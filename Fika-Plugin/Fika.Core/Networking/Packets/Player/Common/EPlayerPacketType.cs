@@ -1,0 +1,112 @@
+﻿namespace Fika.Core.Networking.Packets.Player.Common;
+
+/// <summary>
+/// Represents common sub-packet types for general player actions.
+/// </summary>
+public enum EPlayerPacketType : byte
+{
+    /// <summary>
+    /// Player phrase.
+    /// </summary>
+    Phrase,
+
+    /// <summary>
+    /// Interaction with the world environment.
+    /// </summary>
+    WorldInteraction,
+
+    /// <summary>
+    /// Interaction with containers.
+    /// </summary>
+    ContainerInteraction,
+
+    /// <summary>
+    /// Proceed action.
+    /// </summary>
+    Proceed,
+
+    /// <summary>
+    /// Headlights toggled or updated.
+    /// </summary>
+    HeadLights,
+
+    /// <summary>
+    /// Inventory contents changed.
+    /// </summary>
+    InventoryChanged,
+
+    /// <summary>
+    /// Item dropped.
+    /// </summary>
+    Drop,
+
+    /// <summary>
+    /// Player muffled state changed.
+    /// </summary>
+    MuffledState,
+
+    /// <summary>
+    /// Stationary interaction.
+    /// </summary>
+    Stationary,
+
+    /// <summary>
+    /// Vault or climbing action.
+    /// </summary>
+    Vault,
+
+    /// <summary>
+    /// Generic interaction event.
+    /// </summary>
+    Interaction,
+
+    /// <summary>
+    /// Mounting or dismounting action.
+    /// </summary>
+    Mounting,
+
+    /// <summary>
+    /// Dealing damage
+    /// </summary>
+    Damage,
+
+    /// <summary>
+    /// Armor durability update
+    /// </summary>
+    ArmorDamage,
+
+    /// <summary>
+    /// Syncing health
+    /// </summary>
+    HealthSync,
+
+    /// <summary>
+    /// Usable item being used
+    /// </summary>
+    UsableItem,
+
+    /// <summary>
+    /// Syncing downed state
+    /// </summary>
+    DownedSync,
+
+    /// <summary>
+    /// A player was revived
+    /// </summary>
+    RevivedPlayer,
+
+    /// <summary>
+    /// A player is being revived or revive was cancelled
+    /// </summary>
+    RevivingPlayer,
+
+    /// <summary>
+    /// Tape recorder hands action
+    /// </summary>
+    RecorderAction,
+
+    /// <summary>
+    /// The owner's hands operation timed out and was ended locally
+    /// </summary>
+    FastForwardOutdated
+}

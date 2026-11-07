@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    构建路径配置。
+    这里不写死任何路径：构建时用 -p:GameRoot="D:\SPT" 传入，或先设置环境变量 SPT_ROOT。
+
+    需要指向一个「已装好 SPT 5.0 + BepInDX 6」的游戏根目录，其中：
+      $(GameRoot)\BepInEx\core                BepInDX 6 核心程序集
+      $(GameRoot)\BepInEx\interop             Il2CppInterop 生成的程序集（约 170 个）
+      $(GameRoot)\BepInEx\plugins\sptushonka  SPTushonka.*.dll
+  -->
+  <PropertyGroup>
+    <GameRoot Condition="'$(GameRoot)' == ''">$(SPT_ROOT)</GameRoot>
+    <BepInExCore>$(GameRoot)\BepInEx\core</BepInExCore>
+    <Interop>$(GameRoot)\BepInEx\interop</Interop>
+    <SptPlugins>$(GameRoot)\BepInEx\plugins\sptushonka</SptPlugins>
+    <FikaBuild>$(MSBuildThisFileDirectory)build</FikaBuild>
+    <FikaPlugins>$(FikaBuild)\plugins</FikaPlugins>
+  </PropertyGroup>
+
+</Project>

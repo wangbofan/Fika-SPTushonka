@@ -1,0 +1,36 @@
+﻿using EFT.Ballistics;
+using System.Reflection;
+using Comfort.Common;
+using EFT;
+using EFT.BufferZone;
+using SPTushonka.Reflection.Patching;
+
+namespace Fika.Core.Main.Patches.Lighthouse;
+
+public static class Zyriachy_Patches
+{
+    /// <summary>
+    /// Search for 'Zryachiy don't have controllable zone FIX it' string in assembly to find class
+    /// </summary>
+    public class BossZryachiy_Activate_Patch : ModulePatch
+    {
+        protected override MethodBase GetTargetMethod()
+        {
+            return typeof(BossZryachiy)
+                .GetMethod(nameof(BossZryachiy.Activate));
+        }
+
+        [PatchPostfix]
+        public static void Postfix(BossZryachiy __instance)
+        {
+            __instance._owner.GetPlayer.OnPlayerDead += OnZryachiyDead;
+        }
+
+        private static void OnZryachiyDead(Player player, IPlayer lastAggressor, DamageInfo damageInfo, EBodyPart part)
+        {
+            player.OnPlayerDead -= OnZryachiyDead;
+            Singleton<GameWorld>.Instance.BufferZoneController.SetInnerZoneAvailabilityStatus(false,
+                EBufferZoneData.DisableByZryachiyDead);
+        }
+    }
+}

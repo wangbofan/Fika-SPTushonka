@@ -1,0 +1,25 @@
+<Project>
+
+	<!-- csharp version -->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<LangVersion>latest</LangVersion>
+	</PropertyGroup>
+
+	<!-- use author info from AssemblyInfo.cs -->
+	<PropertyGroup>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+	</PropertyGroup>
+	<ItemGroup>
+		<Compile Include="../Properties/AssemblyInfo.cs" />
+	</ItemGroup>
+
+	<PropertyGroup>
+		<GameDir Condition="'$(GameDir)' == ''">D:/SPT-5.0.0/DEV</GameDir>
+		<BepInExCore>$(GameDir)/BepInEx/core</BepInExCore>
+		<Interop>$(GameDir)/BepInEx/interop</Interop>
+		<SptPlugins>$(GameDir)/BepInEx/plugins/sptushonka</SptPlugins>
+		<FikaPlugins>$(GameDir)/BepInEx/plugins/Fika</FikaPlugins>
+	</PropertyGroup>
+
+</Project>

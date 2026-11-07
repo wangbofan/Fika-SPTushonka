@@ -1,0 +1,80 @@
+﻿using System;
+using EFT;
+using Il2CppInterop.Runtime.Injection;
+using Fika.Core.Main.Utils;
+
+namespace Fika.Core.Main.ObservedClasses.MovementStates;
+
+public class ObservedStationaryState : StationaryPlayerState
+{
+    public ObservedStationaryState(IntPtr pointer) : base(pointer)
+    {
+    }
+
+    public ObservedStationaryState(MovementContext movementContext) : base(ClassInjector.DerivedConstructorPointer<ObservedStationaryState>())
+    {
+        ClassInjector.DerivedConstructorBody(this);
+        ClassInjector.InvokeBaseConstructor<StationaryPlayerState>(this, movementContext);
+    }
+
+    public override bool OutOfOperationRange
+    {
+        get
+        {
+            return false;
+        }
+    }
+
+    public override void Enter(bool isFromSameState)
+    {
+        base.Enter(isFromSameState);
+        StationaryWeapon = MovementContext.StationaryWeapon;
+        StationaryWeapon.ObserverMagazineAmmoCount = StationaryWeapon.GetMagazineCount();
+        if (OutOfOperationRange)
+        {
+            MovementContext.DropStationary(StationaryWeaponPacket.EStationaryCommand.Denied);
+            return;
+        }
+        _denied = false;
+        _exitRotation = new Vector2(StationaryWeapon.Yaw, StationaryWeapon.Pitch);
+        _outTime = 0.5f;
+        if (isFromSameState)
+        {
+            return;
+        }
+        Stage = EStationaryStage.In;
+        MovementContext.StateLocksInventory = true;
+        MovementContext.SetRotationLimit(MovementContext.StationaryWeapon.YawLimit, MovementContext.StationaryWeapon.PitchLimit);
+        MovementContext.SetStationaryWeapon(new Action<Player.AbstractHandsController, Player.AbstractHandsController>(SetStationaryCallback));
+        MovementContext.LeftStanceController.DisableLeftStanceAnimFromBodyAction();
+    }
+
+    public void SetStationaryCallback(Player.AbstractHandsController arg1, Player.AbstractHandsController newContoller)
+    {
+        MovementContext.SetStationaryStrategy();
+        MovementContext.StateLocksInventory = false;
+        _weaponTransform = newContoller.HandsHierarchy.GetTransform(ECharacterWeaponBones.weapon);
+        StationaryWeapon.SetPivots(newContoller.HandsHierarchy);
+        StationaryWeapon.Hide(MovementContext.IsAI);
+        MovementContext.RotationAction = StationaryWeapon.Animation == EFT.Interactive.StationaryWeapon.EStationaryAnimationType.AGS_17
+            ? MovementContext.AGSRotationFunction : MovementContext.UtesRotationFunction;
+        Stage = EStationaryStage.Main;
+        MovementContext.OnHandsControllerChanged += HandleHandsControllerChanged;
+        MovementContext.HandsChangingEvent += MovementContextOnHandsChangedEvent;
+        _handsChangingEventUnsubscribe = new Action(() =>
+        {
+            MovementContext.HandsChangingEvent -= MovementContextOnHandsChangedEvent;
+            _handsChangingEventUnsubscribe = null;
+        });
+    }
+
+    private void HandleHandsControllerChanged(Player.AbstractHandsController oldController, Player.AbstractHandsController newController)
+    {
+        if (newController == null || newController.Item != StationaryWeapon.Item)
+        {
+            MovementContext.OnHandsControllerChanged -= HandleHandsControllerChanged;
+        }
+        
+        OnHandsControllerChanged(oldController, newController);
+    }
+}

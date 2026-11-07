@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "SemanticVersioning": {
+        "type": "Direct",
+        "requested": "[3.0.0, )",
+        "resolved": "3.0.0",
+        "contentHash": "RR+8GbPQ/gjDqov/1QN1OPoUlbUruNwcL3WjWCeLw+MY7+od/ENhnkYxCfAC6rQLIu3QifaJt3kPYyP3RumqMQ=="
+      },
+      "SPTushonka.Common": {
+        "type": "Direct",
+        "requested": "[5.0.0-pre.202609141239, )",
+        "resolved": "5.0.0-pre.202609141239",
+        "contentHash": "NM6Kc0PXx/dcFx3Y18L69NH+yEwcFNRmLB9sUi2zR1r5QenhAPNJHQaumh1CHigz5H7ZAPih/1fkcdJQQauKKQ==",
+        "dependencies": {
+          "SemanticVersioning": "3.0.0",
+          "Spectre.Console": "0.57.2",
+          "Spectre.Console.Cli": "0.55.0",
+          "ZLinq": "1.5.6",
+          "ZLogger": "2.5.10"
+        }
+      },
+      "SPTushonka.DI": {
+        "type": "Direct",
+        "requested": "[5.0.0-pre.202609141239, )",
+        "resolved": "5.0.0-pre.202609141239",
+        "contentHash": "bdsgG/eEU/nlMRJL1RsAJMXXpfHkB/gQmp5/oREJ16kIyOFy+7vO2xjZw02zIUI4T2MfrRFlYjKJ4tDarplx2w==",
+        "dependencies": {
+          "JetBrains.Annotations": "2026.2.0"
+        }
+      },
+      "SPTushonka.Reflection": {
+        "type": "Direct",
+        "requested": "[5.0.0-pre.202609141239, )",
+        "resolved": "5.0.0-pre.202609141239",
+        "contentHash": "5tPFwszDlhGtwfTkWNGyzNatQFKTwpHRLtc/5HztbHf9lXMGTm20pn8ir2g0+E9V8sU4Ewwio9BaeiS2ra/6hA==",
+        "dependencies": {
+          "HarmonyX": "2.16.1",
+          "JetBrains.Annotations": "2026.2.0",
+          "SPTushonka.DI": "5.0.0-pre.202609141239"
+        }
+      },
+      "SPTushonka.Server.Core": {
+        "type": "Direct",
+        "requested": "[5.0.0-pre.202609141239, )",
+        "resolved": "5.0.0-pre.202609141239",
+        "contentHash": "WvzGIluNo6qpoi/gGhW6e2xI8FX2c4UH9pMM7nl8zS0IZAOfQaQroCcHrEl/Eh92p+mcCBe0kabLdHPVOp9EHA==",
+        "dependencies": {
+          "FastCloner": "3.5.5",
+          "SPTushonka.Common": "5.0.0-pre.202609141239",
+          "SPTushonka.DI": "5.0.0-pre.202609141239",
+          "System.IO.Hashing": "10.0.9"
+        }
+      },
+      "SPTushonka.Server.Web": {
+        "type": "Direct",
+        "requested": "[5.0.0-pre.202609141239, )",
+        "resolved": "5.0.0-pre.202609141239",
+        "contentHash": "ErSN/65ym6z05SZ/0vWMgWnGW6nzAgti/7Aj5nh4Ln7pteSfQtIRIHRIiQhifLgRbX/OWYMoNQi6X33Y5MmgRw==",
+        "dependencies": {
+          "Argon2Sharp": "4.0.1",
+          "MudBlazor": "9.7.0",
+          "SPTushonka.Server.Core": "5.0.0-pre.202609141239"
+        }
+      },
+      "Argon2Sharp": {
+        "type": "Transitive",
+        "resolved": "4.0.1",
+        "contentHash": "ROzDpP6VzJI2wHaK9Z6Oyl/wU1pojZAcWzLJEstQj0e2gCzSnJOrQFq2bm+TkUVsMhlq2tUqYykBQMlwGFQcsg=="
+      },
+      "FastCloner": {
+        "type": "Transitive",
+        "resolved": "3.5.5",
+        "contentHash": "q553fGj+/MiKS/LoaAinN9CCeKE6tKCUuCWck38vRB7odTurhlssiSKHWbskPBiEhSnXXWewLAGoqoTaieKMGw=="
+      },
+      "HarmonyX": {
+        "type": "Transitive",
+        "resolved": "2.16.1",
+        "contentHash": "jcak87u4IqYs4rLw/zwuXr6LsmGc/ekQdEGSG6avy3A1aEK66a50BshmizpjpkSNU3uZadMutmy6ePSG5hgmtw==",
+        "dependencies": {
+          "MonoMod.RuntimeDetour": "25.3.4"
+        }
+      },
+      "JetBrains.Annotations": {
+        "type": "Transitive",
+        "resolved": "2026.2.0",
+        "contentHash": "drvAEaI7Xf4wU6dx4UTB9MoZWXZlraaQ0qoeThPQ411FxNhId7QdUTukIC9I8aUHP0ycAaGwZNKqSvfOZQvUlg=="
+      },
+      "Mono.Cecil": {
+        "type": "Transitive",
+        "resolved": "0.11.6",
+        "contentHash": "f33RkDtZO8VlGXCtmQIviOtxgnUdym9xx/b1p9h91CRGOsJFxCFOFK1FDbVt1OCf1aWwYejUFa2MOQyFWTFjbA=="
+      },
+      "MonoMod.Backports": {
+        "type": "Transitive",
+        "resolved": "1.1.2",
+        "contentHash": "baYlNy8n8kmaNhNvqmZ/dIPOeO1r9//dG1i2WbunMWtWZ2EKtIgmXaS+ZzphzTsikkGnoD4Jwr5g0TVdpDjgpw==",
+        "dependencies": {
+          "MonoMod.ILHelpers": "1.1.0"
+        }
+      },
+      "MonoMod.Core": {
+        "type": "Transitive",
+        "resolved": "1.3.4",
+        "contentHash": "yeLEs4Y+hfFjiShKotDYKWiwnADra2kj8pYl66QewdcM/IRPIbjG6wAIVq38Zj9Ry2me33DCwXOHWrTnR7dZ1Q==",
+        "dependencies": {
+          "Mono.Cecil": "0.11.6",
+          "MonoMod.Backports": "1.1.2",
+          "MonoMod.ILHelpers": "1.1.0",
+          "MonoMod.Utils": "25.0.12"
+        }
+      },
+      "MonoMod.ILHelpers": {
+        "type": "Transitive",
+        "resolved": "1.1.0",
+        "contentHash": "L2FWjhTrv7tcIxshfZ+M3OcaNr4cNw0IwiVZEgwqRnZ5QAN3+RrNJ8ZwCzwXUWyPDqooJxMcjjg8PsSYUiNBjQ=="
+      },
+      "MonoMod.RuntimeDetour": {
+        "type": "Transitive",
+        "resolved": "25.3.4",
+        "contentHash": "hzAogPejsFAAWUaa+dFXH2GR2LdLSEAfPfT1sz1wCPXBxHzufbcVo8NkpsrhLEYVIQ0BDb1Xsyv/MqyFShC4bA==",
+        "dependencies": {
+          "Mono.Cecil": "0.11.6",
+          "MonoMod.Backports": "1.1.2",
+          "MonoMod.Core": "1.3.4",
+          "MonoMod.ILHelpers": "1.1.0",
+          "MonoMod.Utils": "25.0.12"
+        }
+      },
+      "MonoMod.Utils": {
+        "type": "Transitive",
+        "resolved": "25.0.12",
+        "contentHash": "8i/uRhkl7vW2DNMmDsIz+D7VaMtv9/jH+m7f4y5Zz3FJGbm15MVSwVfOp/fVV/1Ld6YFxk6jophDNVbAZUKR1Q==",
+        "dependencies": {
+          "Mono.Cecil": "0.11.6",
+          "MonoMod.Backports": "1.1.2",
+          "MonoMod.ILHelpers": "1.1.0"
+        }
+      },
+      "MudBlazor": {
+        "type": "Transitive",
+        "resolved": "9.7.0",
+        "contentHash": "uWOgNn9B556J/TL8KFoSqpA3YD2heqOpK5etcofwlj1RiEX1IDy0NmwYE9urlTUQ8zProEK5GqwTBnoObFPN3g=="
+      },
+      "Spectre.Console": {
+        "type": "Transitive",
+        "resolved": "0.57.2",
+        "contentHash": "wzsB+P9i6F9G+cFOJxRotCiQWNSzZVAMxi8YMiHlGXXU1JLMXGp7zSSqBMmROZS2bzpK5jk+Saa7Evp8HwqhKg==",
+        "dependencies": {
+          "Spectre.Console.Ansi": "0.57.2"
+        }
+      },
+      "Spectre.Console.Ansi": {
+        "type": "Transitive",
+        "resolved": "0.57.2",
+        "contentHash": "Y1+u73shwP+JYHmrkdN6bSt2kaGBEAafhi2nrecczbXdFRey+k7J/WF9YPfcB0rqivv2S8fmif6FSBq9m/AFvw=="
+      },
+      "Spectre.Console.Cli": {
+        "type": "Transitive",
+        "resolved": "0.55.0",
+        "contentHash": "cFJTB1te4eaAICd4Zp+8T/kiRn1ikQxgGqmoNarb1qoQ/7LzHAvVQ62x5U9GW3E0QI7sZLcXIIoq4CpqgTx42Q==",
+        "dependencies": {
+          "Spectre.Console": "0.55.0"
+        }
+      },
+      "System.IO.Hashing": {
+        "type": "Transitive",
+        "resolved": "10.0.9",
+        "contentHash": "vixglGnKEexAJDeIRhyayZYzxyrgK1K9GU3K/zRZVwDbaDcMkSqj4WDHoVmQMNfsdUtLALfNSJw6mBIpdxie4A=="
+      },
+      "Utf8StringInterpolation": {
+        "type": "Transitive",
+        "resolved": "1.3.1",
+        "contentHash": "VIo1LtpoFvp5LlCDkTiQsKrjX+GMA7N37OEJoqHMhCOdIeNoi8uFocnwi8h3TklSySB3U4Y1+gThB00fJTnfGA=="
+      },
+      "ZLinq": {
+        "type": "Transitive",
+        "resolved": "1.5.6",
+        "contentHash": "O2lcAZ1hC2zytrTuJV8WwpGbFURvsAApIEkmFJUKL3CFpedt1cgNVn+ZF00YyN321NL7Vz766wHxIPTzSyfUWg=="
+      },
+      "ZLogger": {
+        "type": "Transitive",
+        "resolved": "2.5.10",
+        "contentHash": "KjQaJ1M3b7cuouXwxhX1CEyCqQ1mOlFslGe5lSELmDYIo5kemzi2Y23jeESqtXrNw+iLLN2+89qpm9Il/cG0bg==",
+        "dependencies": {
+          "System.IO.Hashing": "8.0.0",
+          "Utf8StringInterpolation": "1.3.1"
+        }
+      },
+      "fikashared": {
+        "type": "Project"
+      }
+    }
+  }
+}

@@ -1,0 +1,127 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Reflection;
+using EFT;
+using EFT.Vehicle;
+using HarmonyLib;
+using SPTushonka.Reflection.Patching;
+using Fika.Core.Main.Utils;
+
+namespace Fika.Core.Main.Patches.BTR;
+
+public class BTRSide_Patches
+{
+    public static List<ValueTuple<BTRSide, Player, int>> Passengers = [];
+
+    public class BTRSide_AddPassenger_Patch : ModulePatch
+    {
+        protected override MethodBase GetTargetMethod()
+        {
+            return AccessTools.Method(typeof(BTRSide), nameof(BTRSide.AddPassenger), [typeof(Player), typeof(int)]);
+        }
+
+        [PatchPrefix]
+        public static bool Prefix(BTRSide __instance, Player player, int placeId)
+        {
+            if (FikaBackendUtils.IsTutorial)
+            {
+                return true;
+            }
+
+            if (player.IsYourPlayer)
+            {
+                return true;
+            }
+
+            player.Transform.Original.parent = __instance._startPoint;
+            __instance.ResetPlayerTransform(player);
+            Passengers.Add(new ValueTuple<BTRSide, Player, int>(__instance, player, placeId));
+            __instance.ApplyLocalPassenger();
+            return false;
+        }
+    }
+
+    public class BTRSide_RemovePassenger_Patch : ModulePatch
+    {
+        protected override MethodBase GetTargetMethod()
+        {
+            return AccessTools.Method(typeof(BTRSide), nameof(BTRSide.RemovePassenger), [typeof(Player)]);
+        }
+
+        [PatchPrefix]
+        public static bool Prefix(BTRSide __instance, Player player)
+        {
+            if (FikaBackendUtils.IsTutorial)
+            {
+                return true;
+            }
+
+            if (player.IsYourPlayer)
+            {
+                return true;
+            }
+
+            for (var i = 0; i < Passengers.Count; i++)
+            {
+                var tuple = Passengers[i];
+                if (tuple.Item2 == player)
+                {
+                    Passengers.Remove(tuple);
+                }
+            }
+
+            player.Transform.Original.parent = null;
+            return false;
+        }
+    }
+
+    public class BTRSide_ApplyLocalPassenger_Patch : ModulePatch
+    {
+        protected override MethodBase GetTargetMethod()
+        {
+            return typeof(BTRSide).GetMethod(nameof(BTRSide.ApplyLocalPassenger));
+        }
+
+        [PatchPrefix]
+        public static void Prefix(BTRSide __instance)
+        {
+            if (FikaBackendUtils.IsTutorial)
+            {
+                return;
+            }
+
+            for (var i = 0; i < Passengers.Count; i++)
+            {
+                var tuple = Passengers[i];
+                if (tuple.Item1 == __instance)
+                {
+                    switch (tuple.Item2.BtrState)
+                    {
+                        case EPlayerBtrState.GoIn:
+                        case EPlayerBtrState.GoOut:
+                            {
+                                tuple.Item2.Teleport(__instance._startPoint.position);
+                                var points = __instance.GoInPoints();
+                                __instance.ApplyPlayerRotation(tuple.Item2.MovementContext, points.Item1, points.Item2);
+                                break;
+                            }
+                        case EPlayerBtrState.Inside:
+                            {
+                                tuple.Item2.Teleport(__instance.PlacePosition(tuple.Item3));
+                                var points = __instance.GoInPoints();
+                                __instance.ApplyPlayerRotation(tuple.Item2.MovementContext, points.Item1, points.Item2);
+                                var num = Mathf.Lerp(0f, 0.05f, Mathf.InverseLerp(0f, __instance.BtrView.MoveSpeed, __instance.BtrView.CurrentSpeed));
+                                if (num > Mathf.Epsilon)
+                                {
+                                    tuple.Item2.ProceduralWeaponAnimation.ForceReact.HardShake(num);
+                                }
+                            }
+                            break;
+                        default:
+                            return;
+                    }
+                }
+            }
+        }
+    }
+}

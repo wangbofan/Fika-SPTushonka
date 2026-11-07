@@ -1,0 +1,19 @@
+# build output
+[Bb]in/
+[Oo]bj/
+build/
+*.user
+*.suo
+.vs/
+.idea/
+
+# binaries are not tracked (see NOTICE.md)
+References/
+*.dll
+*.exe
+*.pdb
+*.cache
+*.zip
+
+# logs
+*.log

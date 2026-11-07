@@ -1,0 +1,2850 @@
+// © 2026 Lacyway All Rights Reserved
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Comfort.Common;
+using CommonAssets.Scripts.Audio;
+using Diz.LanguageExtensions;
+using EFT;
+using EFT.Ballistics;
+using EFT.CameraControl;
+using EFT.Communications;
+using EFT.Counters;
+using EFT.Dialogs;
+using EFT.HealthSystem;
+using EFT.Interactive;
+using EFT.InventoryLogic;
+using EFT.Prestige;
+using EFT.Quests;
+using EFT.SeasonalRewards;
+using EFT.Settings;
+using EFT.Settings.Sound;
+using EFT.SynchronizableObjects;
+using EFT.Vehicle;
+using Fika.Core.Main.BaseClasses;
+using Fika.Core.Main.ClientClasses;
+using Fika.Core.Main.ClientClasses.HandsControllers;
+using Fika.Core.Main.Components;
+using Fika.Core.Main.GameMode;
+using Fika.Core.Main.HostClasses;
+using Fika.Core.Main.PacketHandlers;
+using Fika.Core.Main.Utils;
+using Fika.Core.Networking;
+using Fika.Core.Networking.Http;
+using Fika.Core.Networking.Models;
+using Fika.Core.Networking.Packets.Communication;
+using Fika.Core.Networking.Packets.FirearmController;
+using Fika.Core.Networking.Packets.FirearmController.SubPackets;
+using Fika.Core.Networking.Packets.Generic.SubPackets;
+using Fika.Core.Networking.Packets.Player;
+using Fika.Core.Networking.Packets.Player.Common;
+using Fika.Core.Networking.Packets.Player.Common.SubPackets;
+using Fika.Core.Networking.Packets.World;
+using Fika.Core.Networking.Snapshotting;
+using Fika.Core.Networking.VOIP;
+using JsonType;
+using static Fika.Core.Main.ClientClasses.ClientInventoryController;
+using InteractionPacket = Fika.Core.Networking.Packets.Player.Common.SubPackets.InteractionPacket;
+using MountingPacket = Fika.Core.Networking.Packets.Player.Common.SubPackets.MountingPacket;
+
+namespace Fika.Core.Main.Players;
+
+/// <summary>
+/// <see cref="FikaPlayer"/> is the <see cref="LocalPlayer"/>, there can only be one <see cref="FikaPlayer"/> in every game and that is always yourself.
+/// </summary>
+public class FikaPlayer : LocalPlayer
+{
+    public FikaPlayer(IntPtr pointer) : base(pointer)
+    {
+    }
+
+    #region Fields and Properties
+    public IPacketSender PacketSender;
+    public float ObservedOverlap;
+    public CorpseSyncPackets CorpseSyncPacket;
+    public int NetId;
+    public bool IsObservedAI;
+    public readonly Dictionary<uint, Action<ServerOperationStatus>> OperationCallbacks = [];
+    public PlayerSnapshotter<PlayerStateSnapshot> Snapshotter;
+    public virtual bool LeftStanceDisabled { get; internal set; }
+    public DateTime TalkDateTime { get; internal set; }
+    /// <summary>
+    /// If this player is waiting for callbacks from the host
+    /// </summary>
+    public bool WaitingForCallback
+    {
+        get
+        {
+            if (!_baseInventoryController.StrictSync)
+            {
+                return false;
+            }
+            return OperationCallbacks.Count > 0 || _proceedCallbacks.Count > 0;
+        }
+    }
+    public ClientMovementContext ClientMovementContext
+    {
+        get
+        {
+            return MovementContext as ClientMovementContext;
+        }
+    }
+    public Transform SpectateTransform
+    {
+        get
+        {
+            return PlayerBones.LootRaycastOrigin;
+        }
+    }
+
+    public bool Downed
+    {
+        get;
+        internal set
+        {
+            field = value;
+            OnPlayerDownedChanged?.Invoke(this, value);
+        }
+    }
+
+    public override bool OnHisWayToOperateStationaryWeapon
+    {
+        get
+        {
+            if (FikaBackendUtils.IsServer)
+            {
+                return base.OnHisWayToOperateStationaryWeapon;
+            }
+
+            return OperationCallbacks.ContainsKey(OperationStationaryCallbackId);
+        }
+    }
+
+    protected MongoID? _lastWeaponId;
+    protected Il2CppSystem.Action[] _armorUnsubcribes = new Il2CppSystem.Action[Inventory.ArmorSlots.Length];
+
+    internal DamageInfo LatestDamageInfo => LastDamageInfo;
+
+    private bool _hasSkilledScav;
+    private bool _shouldSendSideEffect;
+    private VoipSettings _voipHandler;
+    private FikaVOIPController _voipController;
+    private Bleedout _bleedout;
+
+    protected EPlayerState _currentState;
+    private float _turnSoundTimer;
+
+    public ushort OperationStationaryCallbackId;
+    private uint _proceedCallbackId;
+    private readonly Dictionary<uint, Callback> _proceedCallbacks = [];
+    protected BaseInventoryController _baseInventoryController;
+    #endregion
+
+    /// <summary>
+    /// Invoked when a player spawns and is ready
+    /// </summary>
+    public static Action<FikaPlayer> OnPlayerSpawned { get; set; }
+    /// <summary>
+    /// Invoked when a player is destroyed with <see cref="OnDestroy"/>
+    /// </summary>
+    public static Action<FikaPlayer> OnPlayerDestroyed { get; set; }
+    /// <summary>
+    /// Invoked when a player is killed
+    /// </summary>
+    public static Action<FikaPlayer> OnPlayerDeath { get; set; }
+    /// <summary>
+    /// Invoked when a player down state changes
+    /// </summary>
+    public static Action<FikaPlayer, bool> OnPlayerDownedChanged { get; set; }
+
+    public static async Task<FikaPlayer> Create(GameWorld gameWorld, int playerId, Vector3 position,
+        Quaternion rotation, string layerName, string prefix, EPointOfView pointOfView, Profile profile,
+        bool aiControl, EUpdateQueue updateQueue, EUpdateMode armsUpdateMode, EUpdateMode bodyUpdateMode,
+        CharacterControllerSpawner.Mode characterControllerMode, Il2CppSystem.Func<float> getSensitivity,
+        Il2CppSystem.Func<float> getAimingSensitivity, IStatisticsManager statisticsManager, ICustomizationFilter filter, IEftSession session,
+        int netId, bool strictSync)
+    {
+        var useSimpleAnimator = profile.Info.Settings.UseSimpleAnimator;
+        var resourceKey = useSimpleAnimator ? InGameBundles.ZOMBIE_BUNDLE_NAME : InGameBundles.PLAYER_BUNDLE_NAME;
+        var player = Create<FikaPlayer>(gameWorld, resourceKey, playerId, position, updateQueue, armsUpdateMode,
+                    bodyUpdateMode, characterControllerMode, getSensitivity, getAimingSensitivity, prefix, false, useSimpleAnimator);
+
+        player.enabled = false;
+        player.IsYourPlayer = true;
+        player.NetId = netId;
+        player._playerInMode = ELocalMode.PVE_OFFLINE;
+        player._voipHandler = VoipSettings.Default;
+
+        PlayerOwnerInventoryController inventoryController = FikaBackendUtils.IsServer
+            ? new HostInventoryController(player, profile, false, strictSync)
+            : new ClientInventoryController(player, profile, false, strictSync);
+
+        player._baseInventoryController = inventoryController as BaseInventoryController;
+
+        if (strictSync)
+        {
+            FikaGlobals.LogInfo("Using strict inventory sync");
+        }
+        else
+        {
+            FikaGlobals.LogWarning("Strict inventory sync disable - limited/no support will be given for this raid");
+        }
+
+        QuestControllerClientBackend questController = new ClientSharedQuestController(profile, inventoryController, inventoryController.PlayerSearchController, session, player);
+        questController.Init();
+        AchievementsControllerClientBackend achievementsController = new(profile, inventoryController, questController, session, true);
+        achievementsController.Init();
+        achievementsController.AchievementUnlocked += player.UnlockAchievement;
+        achievementsController.Run();
+        questController.Run();
+        PrestigeControllerClientGame prestigeController = new(profile, inventoryController, questController.Quests, session);
+        SeasonalRewardControllerClientGame seasonalRewardController = new(profile, inventoryController, questController.Quests, session);
+        ClientDialogController dialogController = new(profile, questController, inventoryController, null);
+        var questObjects = new Il2CppSystem.Collections.Generic.List<QuestLocationObject>(LocationScene.GetAllObjects<QuestLocationObject>(false));
+        ClientLocalQuestLocationObjectsController questLocationObjectsController = new(player, questController,
+            questObjects.Cast<Il2CppSystem.Collections.Generic.IReadOnlyList<QuestLocationObject>>(), true);
+
+        if (FikaBackendUtils.IsServer)
+        {
+            player.PacketSender = await ServerPacketSender.Create(player);
+        }
+        else if (FikaBackendUtils.IsClient)
+        {
+            player.PacketSender = await ClientPacketSender.Create(player);
+        }
+
+        var voipState = (!FikaBackendUtils.IsHeadless && FikaGlobals.NetworkManager.AllowVOIP && SoundSettingsGroup.CheckMicrophone())
+            ? EVoipState.Available : EVoipState.NotAvailable;
+
+        await player.Init(rotation, layerName, pointOfView, netId, profile, inventoryController,
+            new ClientHealthController(profile.Health, player, inventoryController, profile.Skills, aiControl),
+            statisticsManager, questController, questLocationObjectsController, achievementsController, prestigeController,
+            dialogController, filter, voipState, false, false, seasonalRewardController).AsManaged();
+        questLocationObjectsController.Initialize();
+
+#if DEBUG
+        profile.Skills.SurgerySpeed.Value = 5f;
+#endif
+
+        foreach (var magazineClass in player.Inventory.GetPlayerItems(EPlayerItems.NonQuestItems).OfType<Magazine>())
+        {
+            player.InventoryController.StrictCheckMagazine(magazineClass, true, player.Profile.MagDrillsMastering, false, false);
+        }
+
+        var services = player._notYetPurchasedTraderServiceTypes;
+        foreach (var etraderServiceType in Singleton<GlobalConfiguration>.Instance.ServicesData.Keys)
+        {
+            services.Add(etraderServiceType);
+        }
+
+        player._handsController = EmptyHandsController.CreateController<EmptyHandsController>(player);
+        player._handsController.Spawn(1f, new System.Action(FikaGlobals.EmptyAction));
+        player.AIData = new AIData(null, player);
+        player.AggressorFound = false;
+        player._animators[0].enabled = true;
+
+        var radioTransmitterRecodableComponent = player.FindRadioTransmitter();
+        if (radioTransmitterRecodableComponent != null)
+        {
+            //Todo: (Archangel) method_131 refers to 'singlePlayerInventoryController_0' which is null in our case
+            //radioTransmitterRecodableComponent.OnRadioTransmitterStatusChanged += player.method_131;
+
+            if (player.Profile.GetTraderStanding("638f541a29ffd1183d187f57").IsZero())
+            {
+                radioTransmitterRecodableComponent.SetEncoded(false);
+            }
+        }
+
+        if (FikaBackendUtils.IsClient && gameWorld.LocationId == "Lighthouse")
+        {
+            player.ActiveHealthController.OnApplyDamageByPlayer += player.RelayLighthouseAggression;
+        }
+
+        player.SubscribeToArmorChangeEvent();
+        player.RecalculateEquippedArmorComponents(null);
+
+        player.Profile.Info.SetProfileNickname(FikaBackendUtils.PMCName ?? profile.Nickname);
+
+        player.enabled = true;
+
+        OnPlayerSpawned?.Invoke(player);
+
+        return player;
+    }
+
+    /// <summary>
+    /// Damage to a client lands on the client, so the host's Lighthouse zone learns about hits on it from here
+    /// </summary>
+    /// <param name="victim">This player</param>
+    /// <param name="aggressor">The player who did the damage</param>
+    private void RelayLighthouseAggression(Player victim, IPlayer aggressor)
+    {
+        if (aggressor == null || aggressor.ProfileId == ProfileId)
+        {
+            return;
+        }
+
+        var packet = new LighthouseAggressionPacket(NetId, aggressor.ProfileId);
+        Singleton<IFikaNetworkManager>.Instance.SendGenericPacket(in packet, DeliveryMethod.ReliableOrdered);
+    }
+
+    private uint GetNextAvailableId()
+    {
+        while (_proceedCallbacks.ContainsKey(++_proceedCallbackId))
+        {
+
+        }
+        return _proceedCallbackId;
+    }
+
+    private uint CreateProceedCallback(Action<bool> confirmAction)
+    {
+        var id = GetNextAvailableId();
+        var handler = new ProceedCallbackHandler(confirmAction);
+        _proceedCallbacks[id] = new System.Action<Comfort.Common.IResult>(handler.Handle);
+#if DEBUG
+        FikaGlobals.LogWarning($"Got callback {id} for proceed callback");
+#endif
+        return id;
+    }
+
+    internal void HandleCallbackResponse(uint callbackId, string error)
+    {
+        var success = string.IsNullOrWhiteSpace(error);
+        if (!success)
+        {
+            FikaGlobals.LogError($"Could not execute callback with id {callbackId} on the server: {error}");
+        }
+
+        if (!_proceedCallbacks.TryGetValue(callbackId, out var callback))
+        {
+            FikaGlobals.LogError($"Could not get callback with id {callback}");
+            return;
+        }
+
+        _proceedCallbacks.Remove(callbackId);
+
+#if DEBUG
+        FikaGlobals.LogInfo($"Callback was success: {success}");
+#endif
+
+        if (success)
+        {
+            callback.Succeed();
+        }
+        else
+        {
+            callback.Fail(error);
+        }
+    }
+
+    public override void InitAudioController()
+    {
+        var stateHandlers = MovementContext.OnStateChangedField;
+        base.InitAudioController();
+        MovementContext.OnStateChangedField = stateHandlers;
+        SetupFikaAudio();
+    }
+
+    protected void SetupFikaAudio()
+    {
+        MovementContext.OnStateChanged += MovementContext_OnStateChanged;
+
+        foreach (var coroutine in new[] { _idleCoroutine, _runCoroutine, _sprintCoroutine })
+        {
+            if (coroutine != null)
+            {
+                StopCoroutine(coroutine);
+            }
+        }
+
+        _idleCoroutine = null;
+        _runCoroutine = null;
+        _sprintCoroutine = null;
+    }
+
+    protected void MovementContext_OnStateChanged(EPlayerState previousState, EPlayerState nextState)
+    {
+        switch (previousState)
+        {
+            case EPlayerState.Sprint:
+                if (!_playedAtLeastOneStep && SinceLastStep > 0.66f)
+                {
+                    if (CheckSurface(_sprintSurfaceCheck))
+                    {
+                        DefaultPlay(_currentSet.SprintSoundBank, 1f, EAudioMovementState.Sprint);
+                    }
+                    _lastStepTime = Time.time;
+                }
+
+                if (nextState == EPlayerState.Transition || nextState == EPlayerState.Idle)
+                {
+                    var volumeMod = FirstPersonPointOfView ? _currentSet.StopSoundBank.BaseVolume : 1f;
+                    var finalStopVolume = volumeMod * MovementContext.CovertMovementVolume;
+                    DefaultPlay(_currentSet.StopSoundBank, finalStopVolume, EAudioMovementState.Stop);
+                }
+                break;
+
+            case EPlayerState.Run:
+            case EPlayerState.MoveZombieState:
+            case EPlayerState.StartMoveZombieState:
+            case EPlayerState.EndMoveZombieState:
+                if (!_playedAtLeastOneStep && SinceLastStep > 0.66f)
+                {
+                    if (CheckSurface(_runSurfaceCheck))
+                    {
+                        PlayStepSound();
+                    }
+                    _lastStepTime = Time.time;
+                }
+                break;
+        }
+
+        switch (nextState)
+        {
+            case EPlayerState.Run:
+            case EPlayerState.MoveZombieState:
+            case EPlayerState.StartMoveZombieState:
+            case EPlayerState.EndMoveZombieState:
+            case EPlayerState.Sprint:
+                _playedAtLeastOneStep = false;
+                break;
+        }
+
+        if (nextState == EPlayerState.Jump)
+        {
+            var jumpBank = _currentSet.JumpSoundBank;
+            DefaultPlay(jumpBank, jumpBank.RandomVolume, EAudioMovementState.Jump);
+            PlayGearSound(MovementContext.CovertEquipmentNoise, true);
+        }
+        else if (nextState == EPlayerState.Prone2Stand)
+        {
+            PlayGearSound(0.7f, true);
+        }
+        else if (nextState == EPlayerState.Transit2Prone)
+        {
+            var moveState = (previousState == EPlayerState.Sprint) ? EAudioMovementState.Drop : EAudioMovementState.None;
+            var finalVolume = 0.7f * MovementContext.CovertMovementVolume;
+
+            if (previousState == EPlayerState.Sprint)
+            {
+                DefaultPlay(_currentSet.ProneDropSoundBank, finalVolume, moveState);
+            }
+            else
+            {
+                PlayGearSound(finalVolume, true);
+            }
+        }
+
+        _playedAtLeastOneStep = false;
+        _currentState = nextState;
+    }
+
+    public override void ManualUpdate(float deltaTime, Il2CppSystem.Nullable<float> platformDeltaTime = null, int loop = 1)
+    {
+        base.ManualUpdate(deltaTime, platformDeltaTime, loop);
+        if (HealthController.IsAlive)
+        {
+            switch (_currentState)
+            {
+                case EPlayerState.Idle:
+                    TickIdleState();
+                    break;
+
+                case EPlayerState.Run:
+                case EPlayerState.MoveZombieState:
+                case EPlayerState.StartMoveZombieState:
+                case EPlayerState.EndMoveZombieState:
+                    TickRunState();
+                    break;
+
+                case EPlayerState.Sprint:
+                    TickSprintState();
+                    break;
+            }
+        }
+    }
+
+    protected void TickSprintState()
+    {
+        if (CurrentState.Name != _currentState)
+        {
+            return;
+        }
+
+        var currentSignValue = AnimatorFootstepSign;
+        if (Math.Abs(_sign - currentSignValue) >= 1E-45f)
+        {
+            _sign = currentSignValue;
+            var elapsed = Time.time - _lastStepTime;
+
+            if (elapsed > 0.2f && MovementContext.FreefallTime < 0.6f)
+            {
+                _playedAtLeastOneStep = true;
+                _lastStepTime = Time.time;
+                UpdateSourcePriority(NestedStepSoundSource);
+
+                if (CheckSurface(_sprintSurfaceCheck))
+                {
+                    UpdateMuffledState();
+                    var sprintBank = _currentSet.SprintSoundBank;
+
+                    var volumeBase = FirstPersonPointOfView ? sprintBank.BaseVolume : 1f;
+                    var weightMod = 0.5f + (3f * Physical.Overweight);
+                    var finalVolume = CalculateMovementVolumeDefaultMultiplier(EAudioMovementState.Sprint) * volumeBase * weightMod;
+
+                    UpdateStepSourceRolloff(EAudioMovementState.Sprint, false);
+
+                    sprintBank.Play(NestedStepSoundSource, EnvironmentType.Outdoor, Distance,
+                        finalVolume, Distance, FirstPersonPointOfView, true);
+                    _specificStepAudioController.Play(EAudioMovementState.Sprint, Environment,
+                        Distance, finalVolume, Distance, FirstPersonPointOfView);
+
+                    PlayGearSound(1f, false);
+
+                    if (elapsed < 1.2f && FirstPersonPointOfView)
+                    {
+                        ProceduralWeaponAnimation.Walk.StepFrequency = 0.5f / Mathf.Clamp(elapsed, 0.3f, 0.8f);
+                    }
+                }
+            }
+        }
+    }
+
+    protected void TickRunState()
+    {
+        if (CurrentState.Name != _currentState)
+        {
+            return;
+        }
+
+        var single_ = AnimatorFootstepSign;
+        if (Math.Abs(_sign - single_) >= 1E-45f)
+        {
+            _sign = single_;
+            var sinceLastStep = SinceLastStep;
+            if (sinceLastStep > 0.2f && MovementContext.FreefallTime < 1f)
+            {
+                _lastStepTime = Time.time;
+                _playedAtLeastOneStep = true;
+
+                if (CheckSurface(_runSurfaceCheck))
+                {
+                    if (sinceLastStep < 1.2f && FirstPersonPointOfView)
+                    {
+                        var clampRange = Mathf.Clamp(sinceLastStep,
+                            0.7f - (MovementContext.SmoothedCharacterMovementSpeed / 2f), 1.2f);
+                        ProceduralWeaponAnimation.Walk.StepFrequency = 0.5f / clampRange;
+                    }
+                    PlayStepSound();
+                }
+            }
+        }
+    }
+
+    protected void TickIdleState()
+    {
+        if (CurrentState.Name != _currentState)
+        {
+            return;
+        }
+
+        var angleMagnitude = Math.Abs(HandsToBodyAngle);
+        if (angleMagnitude > EFTHardSettings.Instance.TURN_ANGLE)
+        {
+            if (Time.time >= _turnSoundTimer)
+            {
+                PlayTurnSound(angleMagnitude);
+                _turnSoundTimer = Time.time + EFTHardSettings.Instance.TURN_SOUND_DELAY;
+            }
+        }
+        else
+        {
+            _turnSoundTimer = 0f;
+        }
+    }
+
+    protected void SubscribeToArmorChangeEvent()
+    {
+        for (var i = 0; i < Inventory.ArmorSlots.Length; i++)
+        {
+            var slotType = Inventory.ArmorSlots[i];
+            var slot = Inventory.Equipment.GetSlot(slotType);
+
+            _armorUnsubcribes[i] = slot.ReactiveContainedItem
+                .Subscribe(new System.Action<EFT.InventoryLogic.Item>(RecalculateEquippedArmorComponents)); // we use subscribe to avoid calling the event on each subscription
+        }
+    }
+
+    /// <summary>
+    /// Recalculates all equipped <see cref="ArmorComponent"/>s when an armor slot changes
+    /// </summary>
+    /// <param name="item">The item changed</param>
+    protected void RecalculateEquippedArmorComponents(Item item)
+    {
+        _preAllocatedArmorComponents.Clear();
+        Inventory.GetPutOnArmorsNonAlloc(_preAllocatedArmorComponents);
+        RecalculateEquipmentParams();
+    }
+
+    private void UnlockAchievement(string tpl)
+    {
+        _achievementsController.UnlockAchievementForced(tpl);
+    }
+
+    public virtual void ToggleDowned(bool downed)
+    {
+        if (!IsYourPlayer)
+        {
+            return;
+        }
+
+        var currentState = ((ClientHealthController)_healthController).Downed;
+        if (currentState != !downed)
+        {
+            FikaGlobals.LogWarning($"Trying to set downed to {downed} but it is already {currentState}");
+            return;
+        }
+
+        Downed = downed;
+
+        if (downed)
+        {
+            Speaker.Play(EPhraseTrigger.OnAgony, HealthStatus, true, new Il2CppSystem.Nullable<int>());
+            ActiveHealthController.SetDamageCoeff(0f);
+            ActiveHealthController.PauseAllEffects();
+            ActiveHealthController.DisableMetabolism();
+            MovementContext.IsInPronePose = true;
+            HandsController.FastForwardCurrentState();
+            TrySaveLastItemInHands();
+            Proceed(false, null);
+            ((SimpleCharacterController)CharacterController).IsMoveIgnored = true;
+            MovementContext.IsAxesIgnored = true;
+            var clientHealthController = _healthController as ClientHealthController;
+            clientHealthController.Downed = true;
+            if (_bleedout != null)
+            {
+                Destroy(_bleedout);
+            }
+            _bleedout = gameObject.AddComponent<Bleedout>();
+            _bleedout.Init(clientHealthController);
+            _bleedout.ShowUI();
+
+            var camera = CameraManager.Instance.Camera;
+            var deathEffect = camera.GetComponent<DeathFade>();
+            if (deathEffect != null)
+            {
+                deathEffect.enabled = true;
+                deathEffect.EnableEffect();
+            }
+            var fastBlur = camera.GetComponent<FastBlur>();
+            if (fastBlur != null)
+            {
+                fastBlur.enabled = true;
+                fastBlur.Die();
+            }
+        }
+        else
+        {
+            ActiveHealthController.SetDamageCoeff(1f);
+            ActiveHealthController.UnpauseAllEffects();
+            ActiveHealthController.IsAlive = true;
+            TrySetLastEquippedWeapon(true);
+            ((SimpleCharacterController)CharacterController).IsMoveIgnored = false;
+            MovementContext.IsAxesIgnored = false;
+            var clientHealthController = _healthController as ClientHealthController;
+            clientHealthController.EnableMetabolism();
+            clientHealthController.Revive();
+            UpdateSpeedLimitByHealth();
+            if (_bleedout != null)
+            {
+                _bleedout.HideUI();
+                Destroy(_bleedout);
+            }
+
+            var camera = CameraManager.Instance.Camera;
+            var deathEffect = camera.GetComponent<DeathFade>();
+            if (deathEffect != null)
+            {
+                deathEffect.enabled = true;
+                deathEffect.DisableEffect();
+            }
+            var fastBlur = camera.GetComponent<FastBlur>();
+            if (fastBlur != null)
+            {
+                fastBlur.Reset();
+                fastBlur.enabled = false;
+            }
+        }
+
+        var packet = new DownedSyncPacket(downed);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public virtual void ToggleRevive(bool reviving, string nickname)
+    {
+#if DEBUG
+        FikaGlobals.LogInfo($"Being revived by {nickname}");
+#endif
+        if (_bleedout == null)
+        {
+            FikaGlobals.LogError("Bleedout component was null when attempting to set revive notification");
+            return;
+        }
+
+        if (reviving)
+        {
+            _bleedout.ShowRevive(nickname);
+            return;
+        }
+
+        _bleedout.HideRevive();
+        _bleedout.ShowUI();
+    }
+
+    public override void InitVoip(EVoipState voipState)
+    {
+        if (_voipHandler.VoipEnabled && voipState != EVoipState.NotAvailable)
+        {
+            var settings = Singleton<SettingsManager>.Instance.Sound.Settings;
+            if (!settings.VoipEnabled)
+            {
+                voipState = EVoipState.Off;
+            }
+            if (!_voipHandler.MicrophoneChecked)
+            {
+                voipState = EVoipState.MicrophoneFail;
+            }
+            base.InitVoip(voipState);
+            _voipController = new(this, settings);
+            VoipController = _voipController;
+        }
+    }
+
+    public override void CreateNestedSource()
+    {
+        base.CreateNestedSource();
+        NestedStepSoundSource.SetBaseVolume(0.9f);
+    }
+
+    public override PhysicalBase CreatePhysical()
+    {
+        return new FikaClientPhysical();
+    }
+
+    public override void CreateMovementContext()
+    {
+        var movement_MASK = EFTHardSettings.Instance.MOVEMENT_MASK;
+        if (FikaPlugin.Instance.Settings.UseInertia)
+        {
+            MovementContext = ClientMovementContext.Create(this, new System.Func<ICharacterController>(GetCharacterControllerCommon), movement_MASK);
+            return;
+        }
+        MovementContext = NoInertiaMovementContext.Create(this, new System.Func<ICharacterController>(GetCharacterControllerCommon), movement_MASK);
+    }
+
+    public override void OnSkillLevelChanged(BaseSkill skill)
+    {
+        NotificationManager.DisplayNotification(new SkillLevelUpNotification(skill));
+    }
+
+    public override void SendVoiceMuffledState(bool isMuffled)
+    {
+        var packet = new MuffledStatePacket(isMuffled);
+        FikaGlobals.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public override void OnWeaponMastered(Mastering masterSkill)
+    {
+        FikaGlobals.DisplayMessage(string.Format("MasteringLevelUpMessage".Localized(null),
+            masterSkill.MasteringGroup.Id.Localized(null),
+            masterSkill.Level.ToString()), ENotificationDurationType.Default, ENotificationIconType.Default, null);
+    }
+
+    public override void ApplyDamageInfo(DamageInfo damageInfo, EBodyPart bodyPartType, EBodyPartColliderType colliderType, float absorbed)
+    {
+        if (IsYourPlayer && damageInfo.Player != null
+            && !FikaPlugin.Instance.Settings.FriendlyFire
+            && string.Equals(damageInfo.Player.iPlayer.GroupId, GroupId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (damageInfo.Weapon != null)
+        {
+            _lastWeaponId = damageInfo.Weapon.Id;
+        }
+
+        base.ApplyDamageInfo(damageInfo, bodyPartType, colliderType, absorbed);
+    }
+
+    public override PlayerHitInfo ApplyShot(DamageInfo damageInfo, EBodyPart bodyPartType, EBodyPartColliderType colliderType, EArmorPlateCollider armorPlateCollider, ShotId shotId)
+    {
+        if (damageInfo.DamageType is EDamageType.Sniper or EDamageType.Landmine)
+        {
+            return SimulatedApplyShot(damageInfo, bodyPartType, colliderType, armorPlateCollider);
+        }
+
+        if (damageInfo.Player != null && damageInfo.Player.IsAI)
+        {
+            if (damageInfo.Weapon != null)
+            {
+                _lastWeaponId = damageInfo.Weapon.Id;
+            }
+            return SimulatedApplyShot(damageInfo, bodyPartType, colliderType, armorPlateCollider);
+        }
+
+        return null;
+    }
+
+    private PlayerHitInfo SimulatedApplyShot(DamageInfo damageInfo, EBodyPart bodyPartType, EBodyPartColliderType colliderType, EArmorPlateCollider armorPlateCollider)
+    {
+        var activeHealthController = ActiveHealthController;
+        if (activeHealthController != null && !activeHealthController.IsAlive)
+        {
+            return null;
+        }
+        var flag = damageInfo.DeflectedBy.HasValue;
+        var damage = damageInfo.Damage;
+        var list = ProceedDamageThroughArmor(ref damageInfo, colliderType, armorPlateCollider, true);
+        ProceedArmorDamaged(list);
+        var materialType = flag ? MaterialType.HelmetRicochet : ((list == null || list.Count < 1)
+            ? MaterialType.Body : list[0].Material);
+        PlayerHitInfo hitInfo = new()
+        {
+            PoV = PointOfView,
+            Penetrated = damageInfo.Penetrated,
+            Material = materialType
+        };
+        var num = damage - damageInfo.Damage;
+        if (num > 0)
+        {
+            damageInfo.DidArmorDamage = num;
+        }
+        ApplyDamageInfo(damageInfo, bodyPartType, colliderType, 0f);
+        ShotReactions(damageInfo, bodyPartType);
+        ReceiveDamage(damageInfo.Damage, bodyPartType, damageInfo.DamageType, num, hitInfo.Material);
+
+        return hitInfo;
+    }
+
+    #region Proceed
+    public override void Proceed(bool withNetwork, Callback<IEmptyHandsController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        var handler = new EmptyHandsControllerHandler(this, scheduled);
+        var func = new Func<EmptyHandsController>(handler.ReturnController);
+        handler.Process = new Process<EmptyHandsController, IEmptyHandsController>(this, func, null);
+        if (withNetwork && FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(FoodDrink foodDrink, float amount, Callback<IMedsController> callback, int animationVariant, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        EFT.NetworkPackets.OneAndList<EBodyPart> bodyparts = new(EBodyPart.Head);
+        FoodControllerHandler handler = new(this, foodDrink, amount, bodyparts, animationVariant);
+        Func<MedsController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, foodDrink, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, foodDrink, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(Meds meds, EFT.NetworkPackets.OneAndList<EBodyPart> bodyParts, Callback<IMedsController> callback, int animationVariant, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        MedsControllerHandler handler = new(this, meds, bodyParts, animationVariant);
+
+        Func<MedsController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, meds, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, meds, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed<T>(Item item, Callback<IUsableItemController> callback, bool scheduled = true)
+    {
+        if (item is PortableRangeFinder)
+        {
+            PortableRangeFinderControllerHandler rangeFinderHandler = new(this, item);
+
+            Func<PortableRangeFinderController> rangeFinderFunc = new(rangeFinderHandler.ReturnController);
+
+            if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+            {
+                rangeFinderHandler.Process = new(this, rangeFinderFunc, item, false, confirmation: AbstractProcess.Confirmation.Unknown);
+                rangeFinderHandler.ConfirmCallback = new(rangeFinderHandler.SendCallbackRequest);
+            }
+            else
+            {
+                rangeFinderHandler.Process = new(this, rangeFinderFunc, item, false);
+                rangeFinderHandler.ConfirmCallback = new(rangeFinderHandler.SendPacket);
+            }
+            rangeFinderHandler.Process.Proceed(new System.Action<IResult>(rangeFinderHandler.HandleResult), callback, scheduled);
+            return;
+        }
+
+        UsableItemControllerHandler handler = new(this, item);
+
+        Func<UsableItemController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, item, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, item, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(Item item, Callback<IQuickUseItem> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        QuickUseItemControllerHandler handler = new(this, item);
+
+        Func<QuickUseItemController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, item, true, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, item, true);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(KnifeComponent knife, Callback<IKnifeController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        KnifeControllerHandler handler = new(this, knife);
+
+        Func<KnifeController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, handler.Knife.Item, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, handler.Knife.Item, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(RecorderItem recorder, Callback<IRecorderController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        RecorderControllerHandler handler = new(this, recorder);
+
+        Func<RecorderHandsController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, recorder, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, recorder, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(KnifeComponent knife, Callback<IQuickKnifeKickController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        QuickKnifeControllerHandler handler = new(this, knife);
+
+        Func<QuickKnifeKickController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, handler.Knife.Item, true, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, handler.Knife.Item, true);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(ThrowWeap throwWeap, Callback<IQuickGrenadeThrowController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        QuickGrenadeControllerHandler handler = new(this, throwWeap);
+
+        Func<QuickGrenadeThrowHandsController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, throwWeap, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, throwWeap, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(ThrowWeap throwWeap, Callback<IGrenadeController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        GrenadeControllerHandler handler = new(this, throwWeap);
+
+        Func<GrenadeHandsController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new(this, func, throwWeap, false, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new(this, func, throwWeap, false);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+
+    public override void Proceed(Weapon weapon, Callback<IFirearmHandsController> callback, bool scheduled = true)
+    {
+        if (!_healthController.IsAlive && !Downed)
+        {
+            return;
+        }
+
+        FirearmControllerHandler handler = new(this, weapon);
+        var flag = false;
+        if (_handsController is FirearmController firearmController)
+        {
+            flag = firearmController.CheckForFastWeaponSwitch(handler.Weapon);
+        }
+        Func<FirearmController> func = new(handler.ReturnController);
+
+        if (FikaBackendUtils.IsClient && _baseInventoryController.StrictSync)
+        {
+            handler.Process = new Process<FirearmController, IFirearmHandsController>(this, func, handler.Weapon, flag, confirmation: AbstractProcess.Confirmation.Unknown);
+            handler.ConfirmCallback = new(handler.SendCallbackRequest);
+        }
+        else
+        {
+            handler.Process = new Process<FirearmController, IFirearmHandsController>(this, func, handler.Weapon, flag);
+            handler.ConfirmCallback = new(handler.SendPacket);
+        }
+        handler.Process.Proceed(new System.Action<IResult>(handler.HandleResult), callback, scheduled);
+    }
+    #endregion
+
+    public override void DropCurrentController(Il2CppSystem.Action callback, bool fastDrop, Item nextControllerItem = null)
+    {
+        var packet = new DropPacket(fastDrop);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        base.DropCurrentController(callback, fastDrop, nextControllerItem);
+    }
+
+    public override void OnBeenKilledByAggressor(IPlayer aggressor, DamageInfo damageInfo, EBodyPart bodyPart, EDamageType lethalDamageType)
+    {
+        base.OnBeenKilledByAggressor(aggressor, damageInfo, bodyPart, lethalDamageType);
+
+        // Handle 'Help Scav' rep gains
+        if (aggressor is FikaPlayer fikaPlayer)
+        {
+            if (fikaPlayer.Side == EPlayerSide.Savage)
+            {
+                fikaPlayer.Loyalty.MyPlayerIsSavage(this);
+            }
+
+            if (Side == EPlayerSide.Savage && fikaPlayer.Side != EPlayerSide.Savage && !fikaPlayer._hasSkilledScav)
+            {
+                fikaPlayer._hasSkilledScav = true;
+                return;
+            }
+            else if (Side != EPlayerSide.Savage && _hasSkilledScav && aggressor.Side == EPlayerSide.Savage)
+            {
+                fikaPlayer.Profile?.FenceInfo?.AddStanding(Profile.Info.Settings.StandingForKill, EFT.Counters.EFenceStandingSource.ScavHelp);
+            }
+        }
+    }
+
+    public override void MouseLook(bool forceApplyToOriginalRibcage = false)
+    {
+        if (HandsController == null)
+        {
+            return;
+        }
+
+        MovementContext.RotationAction?.Invoke(this);
+    }
+
+    protected Item FindWeapon()
+    {
+#if DEBUG
+        FikaGlobals.LogWarning($"Finding weapon '{_lastWeaponId}'!");
+#endif
+        var itemResult = FindItemById(_lastWeaponId, false, false);
+        var item = itemResult.Value;
+        if (!itemResult.Succeeded)
+        {
+            for (var i = 0; i < FikaGlobals.FikaGame.GameController.ThrownGrenades.Count; i++)
+            {
+                var grenadeClass = FikaGlobals.FikaGame.GameController.ThrownGrenades[i];
+                if (grenadeClass.Id == _lastWeaponId)
+                {
+                    item = grenadeClass;
+                    break;
+                }
+            }
+        }
+
+        if (item == null)
+        {
+            var stationaryWeapon = GameWorld.FindStationaryWeaponByItemId(_lastWeaponId);
+            if (stationaryWeapon != null)
+            {
+                item = stationaryWeapon.Item;
+            }
+        }
+
+        return item;
+    }
+
+    protected void FindKillerWeapon()
+    {
+        if (LastAggressor == null)
+        {
+            FikaGlobals.LogWarning("LastAggressor was null, skipping");
+            return;
+        }
+
+        if (!IsYourPlayer && !string.Equals(LastAggressor.GroupId, FikaGlobals.FikaGroupId, StringComparison.OrdinalIgnoreCase))
+        {
+#if DEBUG
+            FikaGlobals.LogWarning($"Skipping because {LastAggressor.Profile.Nickname} is not a player");
+#endif
+            return;
+        }
+
+        var item = FindWeapon();
+        if (item == null)
+        {
+            FikaGlobals.LogError($"Could not find killer weapon: {_lastWeaponId}!");
+            return;
+        }
+        var lastDamageInfo = LastDamageInfo;
+        lastDamageInfo.Weapon = item;
+        LastDamageInfo = lastDamageInfo;
+    }
+
+    public void HandleTeammateKill(DamageInfo damage, EBodyPart bodyPart,
+        EPlayerSide playerSide, WildSpawnType role, string playerProfileId,
+        float distance, List<string> targetEquipment,
+        HealthEffects enemyEffects, List<string> zoneIds, Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray enemyBuffs, FikaPlayer killer)
+    {
+#if DEBUG
+        FikaGlobals.LogWarning($"HandleTeammateKill: Weapon {(damage.Weapon != null ? damage.Weapon.Name.Localized() : "None")}");
+#endif
+
+        if (role != WildSpawnType.pmcBEAR)
+        {
+            if (role == WildSpawnType.pmcUSEC)
+            {
+                playerSide = EPlayerSide.Usec;
+            }
+        }
+        else
+        {
+            playerSide = EPlayerSide.Bear;
+        }
+
+        List<string> list = ["Any"];
+        switch (playerSide)
+        {
+            case EPlayerSide.Usec:
+                list.Add("Usec");
+                list.Add("AnyPmc");
+                list.Add("Enemy");
+                break;
+            case EPlayerSide.Bear:
+                list.Add("Bear");
+                list.Add("AnyPmc");
+                list.Add("Enemy");
+                break;
+            case EPlayerSide.Savage:
+                list.Add("Savage");
+                list.Add("Bot");
+                break;
+        }
+
+        for (var i = 0; i < list.Count; i++)
+        {
+            var value = list[i];
+            QuestController.CheckKillConditionCounter(value, playerProfileId, (targetEquipment).ToIl2CppList(), damage.Weapon,
+                            bodyPart, Location, distance, role.ToStringNoBox(), CurrentHour, enemyEffects,
+                            killer.HealthController.BodyPartEffects, (zoneIds).ToIl2CppList(), killer.HealthController.ActiveBuffsNames(), enemyBuffs);
+        }
+    }
+
+    protected void HandleSharedExperience(bool countAsBoss, int experience, CountersCollection sessionCounters)
+    {
+        if (experience <= 0)
+        {
+            experience = Singleton<GlobalConfiguration>.Instance.Experience.Kill.VictimBotLevelExp;
+        }
+
+        if (FikaPlugin.Instance.Settings.SharedKillExperience.Value && !countAsBoss)
+        {
+            var toReceive = experience / 2;
+#if DEBUG
+            FikaGlobals.LogInfo($"Received shared kill XP of {toReceive}");
+#endif
+            sessionCounters.AddLong(1L, PredefinedCounters.Kills);
+            sessionCounters.AddInt(toReceive, PredefinedCounters.ExpKillBase);
+        }
+
+        if (FikaPlugin.Instance.Settings.SharedBossExperience.Value && countAsBoss)
+        {
+            var toReceive = experience / 2;
+#if DEBUG
+            FikaGlobals.LogInfo($"Received shared boss XP of {toReceive}");
+#endif
+            sessionCounters.AddLong(1L, PredefinedCounters.Kills);
+            sessionCounters.AddInt(toReceive, PredefinedCounters.ExpKillBase);
+        }
+    }
+
+#if DEBUG
+    public override void ShowStringNotification(string message)
+    {
+        if (IsYourPlayer)
+        {
+            EFT.UI.ConsoleScreen.Log(message);
+            FikaGlobals.LogInfo(message);
+        }
+    }
+#endif
+
+    public override void SetInventoryOpened(bool opened)
+    {
+        if (this is ObservedPlayer)
+        {
+            base.SetInventoryOpened(opened);
+            return;
+        }
+
+        base.SetInventoryOpened(opened);
+
+        if (PacketSender?.NetworkManager == null)
+        {
+            return;
+        }
+
+        var packet = new InventoryChangedPacket(opened);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public override void SendHeadlightsPacket(bool isSilent)
+    {
+        if (PacketSender != null && PacketSender.NetworkManager != null)
+        {
+            LightsState[] lightStates = [.. _helmetLightControllers.Select(FikaGlobals.GetFirearmLightStates)];
+
+            var packet = new HeadLightsPacket(lightStates.Length, isSilent, lightStates);
+            PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+    }
+
+    public override void SendWeaponLightPacket()
+    {
+        if (PacketSender == null)
+        {
+            return;
+        }
+
+        if (HandsController is FikaClientFirearmController controller)
+        {
+            LightsState[] array = [.. controller.Item.AllSlots
+                .Select(FikaGlobals.GetContainedItem)
+                .ToIl2CppList()
+                .GetComponents<LightComponent>()
+                .Select(FikaGlobals.GetFirearmLightStatesFromComponent)];
+
+            if (array.Length == 0)
+            {
+                return;
+            }
+
+            var packet = new LightStatesPacket(array.Length, array);
+            controller.SendLightStates(in packet);
+        }
+    }
+
+    public override void OnPhraseTold(EPhraseTrigger @event, TaggedClip clip, TagBank bank, BaseSpeaker speaker)
+    {
+        base.OnPhraseTold(@event, clip, bank, speaker);
+
+        if (ActiveHealthController.IsAlive)
+        {
+            var packet = new PhrasePacket(@event, clip.NetId);
+            PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+    }
+
+    public override Corpse CreateCorpse()
+    {
+        if (FikaBackendUtils.IsServer)
+        {
+            var corpse = base.CreateCorpse();
+            CorpsePositionSyncer.Create(corpse.gameObject, corpse, NetId);
+            return corpse;
+        }
+
+        var observedCorpse = CreateCorpse<ObservedCorpse>(Velocity);
+        observedCorpse.SetSpecificSettings(PlayerBones.RightPalm);
+        Singleton<GameWorld>.Instance.ObservedPlayersCorpses.Add(NetId, observedCorpse);
+        return observedCorpse;
+    }
+
+    public override void OperateStationaryWeapon(StationaryWeapon stationaryWeapon, StationaryWeaponPacket.EStationaryCommand command)
+    {
+        if (command is StationaryWeaponPacket.EStationaryCommand.Occupy)
+        {
+            if (WaitingForCallback || !HandsController.CanRemove())
+            {
+                return;
+            }
+            if (FikaBackendUtils.IsClient)
+            {
+                _inventoryController.ExecuteStationaryOperation(stationaryWeapon, new System.Action<Comfort.Common.IResult>(CheckIfStationarySucceeded));
+            }
+        }
+
+        base.OperateStationaryWeapon(stationaryWeapon, command);
+
+        var packet = new StationaryPacket((EStationaryCommand)command, stationaryWeapon != null ? stationaryWeapon.Id : string.Empty);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    private void CheckIfStationarySucceeded(IResult result)
+    {
+        if (result.Succeed)
+        {
+            return;
+        }
+        MovementContext.PlayerAnimatorSetStationary(false);
+        MovementContext.PlayerAnimatorSetApproached(true);
+        CurrentManagedState.DropStationary();
+        if (MovementContext.StationaryWeapon != null)
+        {
+            MovementContext.StationaryWeapon.Unlock(ProfileId);
+        }
+    }
+
+    // Start
+    public override void StartInteraction(WorldInteractiveObject interactiveObject, InteractionResult interactionResult, Il2CppSystem.Action callback, bool enterDoorState = true)
+    {
+        var packet = new WorldInteractionPacket(interactiveObject.Id, interactionResult.InteractionType,
+            EInteractionStage.Start, (interactionResult is UnlockResult keyInteractionResult) ? keyInteractionResult.Key.Item.Id : null);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        if (interactiveObject is Door door)
+        {
+            if (interactionResult.InteractionType == EInteractionType.Seal)
+            {
+                door.StartSealing();
+            }
+            else if (interactionResult.InteractionType == EInteractionType.Unseal)
+            {
+                door.StartUnsealing();
+            }
+        }
+        if (enterDoorState)
+        {
+            CurrentManagedState.StartDoorInteraction(interactiveObject, interactionResult, callback);
+        }
+        UpdateInteractionCast();
+    }
+
+    // Execute
+    public override void ExecuteInteraction(WorldInteractiveObject door, InteractionResult interactionResult)
+    {
+        base.ExecuteInteraction(door, interactionResult);
+        if (!door.ForceLocalInteraction)
+        {
+            var packet = new WorldInteractionPacket(door.Id, interactionResult.InteractionType,
+                EInteractionStage.Execute, (interactionResult is UnlockResult keyInteractionResult) ? keyInteractionResult.Key.Item.Id : null);
+            PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+        UpdateInteractionCast();
+    }
+
+    public override void CancelDoorInteraction(WorldInteractiveObject door, InteractionResult interactionResult)
+    {
+        base.CancelDoorInteraction(door, interactionResult);
+        if (door != null && !door.ForceLocalInteraction)
+        {
+            var packet = new WorldInteractionPacket(door.Id, interactionResult.InteractionType,
+                EInteractionStage.Ignore, (interactionResult is UnlockResult keyInteractionResult) ? keyInteractionResult.Key.Item.Id : null);
+            PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+        UpdateInteractionCast();
+    }
+
+    public override void PlantItemNetwork(string itemId, string zoneId, bool successful)
+    {
+        base.PlantItemNetwork(itemId, zoneId, successful);
+        UpdateInteractionCast();
+    }
+
+    public override void OnAnimatedInteraction(EInteraction interaction)
+    {
+        if (!FikaGlobals.BlockedInteractions.Contains(interaction))
+        {
+            var packet = new InteractionPacket(interaction);
+            PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+    }
+    
+    public override void ResetGestureInHands()
+    {
+        base.ResetGestureInHands();
+
+        if (this is ObservedPlayer || PacketSender?.NetworkManager == null)
+        {
+            return;
+        }
+
+        var packet = new InteractionPacket(EInteraction.None);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public override void HealthControllerUpdate(float deltaTime)
+    {
+        _healthController?.ManualUpdate(deltaTime);
+    }
+
+    public override void UpdateTriggerColliderSearcher(float deltaTime, bool isCloseToCamera = true)
+    {
+        _triggerColliderSearcher.ManualUpdate(deltaTime, isCloseToCamera);
+    }
+
+    public override void OnMounting(EFT.MountingPacket.EMountingCommand command)
+    {
+        var mountData = MovementContext.PlayerMountingPointData;
+        MountingPacket packet;
+        if (command != EFT.MountingPacket.EMountingCommand.Enter)
+        {
+            packet = new MountingPacket(command, MovementContext.IsInMountedState, MovementContext.IsInMountedState ? mountData.MountPointData.MountDirection : default,
+                MovementContext.IsInMountedState ? mountData.MountPointData.MountPoint : default,
+                MovementContext.IsInMountedState ? mountData.CurrentMountingPointVerticalOffset : 0f,
+               MovementContext.IsInMountedState ? (short)mountData.MountPointData.MountSideDirection : (short)0);
+        }
+        else
+        {
+            packet = new MountingPacket(command, MovementContext.IsInMountedState, MovementContext.IsInMountedState ? mountData.MountPointData.MountDirection : default,
+                MovementContext.IsInMountedState ? mountData.MountPointData.MountPoint : default,
+                mountData.PlayerTargetPos, mountData.TargetPoseLevel, mountData.TargetHandsRotation, mountData.PoseLimit, mountData.PitchLimit,
+                mountData.YawLimit, mountData.TargetBodyRotation, MovementContext.IsInMountedState ? mountData.CurrentMountingPointVerticalOffset : 0f,
+                MovementContext.IsInMountedState ? (short)mountData.MountPointData.MountSideDirection : (short)0, mountData.CurrentApproachTime);
+        }
+
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId,
+            command is EFT.MountingPacket.EMountingCommand.Update ? DeliveryMethod.Unreliable : DeliveryMethod.ReliableOrdered,
+            true);
+    }
+
+    public override void TransitInteraction(TransitController controller, int transitPointId, string keyId, EDateTime time)
+    {
+        var packet = controller.GetInteractPacket(transitPointId, keyId, time);
+        if (FikaBackendUtils.IsServer)
+        {
+            controller.InteractWithTransit(this, packet);
+        }
+        else
+        {
+            TransitInteractPacket interactPacket = new()
+            {
+                NetId = NetId,
+                Data = packet
+            };
+            Singleton<FikaClient>.Instance.SendData(ref interactPacket, DeliveryMethod.ReliableOrdered);
+            if (Singleton<GameWorld>.Instance.TransitController is ClientClasses.ClientTransitController transitController)
+            {
+                transitController.InteractPacket = packet;
+            }
+        }
+        UpdateInteractionCast();
+    }
+
+    public override void TripwireInteraction(TripwireSynchronizableObject tripwire)
+    {
+        base.TripwireInteraction(tripwire);
+        SynchronizableObjectPacket data = new()
+        {
+            ObjectType = SynchronizableObjectType.Tripwire,
+            ObjectId = tripwire.ObjectId,
+            PacketData = new()
+            {
+                TripwireDataPacket = new()
+                {
+                    State = ETripwireState.Inert
+                }
+            },
+            Position = tripwire.transform.position,
+            Rotation = tripwire.transform.rotation.eulerAngles,
+            IsActive = true
+        };
+        UpdateInteractionCast();
+
+        var packet = new DisarmTripwirePacket(data);
+        FikaGlobals.NetworkManager.SendGenericPacket(in packet, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public override void EventObjectInteraction(EventObjectController controller, int objectId, EventObject.EInteraction interaction)
+    {
+        var packet = controller.GetInteractPacket(objectId, interaction);
+        if (FikaBackendUtils.IsServer)
+        {
+            controller.InteractWithEventObject(this, packet);
+        }
+        else
+        {
+            EventControllerInteractPacket interactPacket = new()
+            {
+                NetId = NetId,
+                Data = packet
+            };
+            PacketSender.NetworkManager.SendData(ref interactPacket, DeliveryMethod.ReliableOrdered, true);
+        }
+        UpdateInteractionCast();
+    }
+
+    public override void ApplyCorpseImpulse()
+    {
+        Corpse.Ragdoll.ApplyImpulse(LastDamageInfo.HitCollider, LastDamageInfo.Direction, LastDamageInfo.HitPoint, _corpseAppliedForce);
+    }
+
+    public void SetupCorpseSyncPacket(SyncHealthPacket packet)
+    {
+        var num = EFTHardSettings.Instance.HIT_FORCE;
+        num *= 0.3f + (0.7f * Mathf.InverseLerp(50f, 20f, LastDamageInfo.PenetrationPower));
+        _corpseAppliedForce = num;
+
+        if (FikaBackendUtils.IsServer || IsYourPlayer)
+        {
+            if (DogtagSide is not EPlayerSide.Savage)
+            {
+                GenerateDogtagDetails();
+            }
+        }
+
+        var inventoryDescriptor = ItemBinarySerializer.SerializeItem(Inventory.Equipment, FikaGlobals.SearchControllerSerializer);
+        var corpseSyncPacket = new CorpseSyncPackets()
+        {
+            BodyPartColliderType = LastDamageInfo.BodyPartColliderType,
+            Direction = LastDamageInfo.Direction,
+            Point = LastDamageInfo.HitPoint,
+            Force = _corpseAppliedForce,
+            InventoryDescriptor = inventoryDescriptor,
+            ItemSlot = EquipmentSlot.ArmBand
+        };
+
+        if (TriggerZones.Count > 0)
+        {
+            corpseSyncPacket.TriggerZones.AddRange(TriggerZones);
+        }
+
+        if (HandsController.Item != null)
+        {
+            var heldItem = HandsController.Item;
+            for (var i = 0; i < FikaGlobals.WeaponSlots.Count; i++)
+            {
+                var weaponSlot = FikaGlobals.WeaponSlots[i];
+                if (heldItem == Equipment.GetSlot(weaponSlot).ContainedItem)
+                {
+                    corpseSyncPacket.ItemSlot = weaponSlot;
+                    break;
+                }
+            }
+        }
+
+        MongoID killerId = null;
+        if (LastAggressor != null)
+        {
+            killerId = LastAggressor.ProfileId;
+        }
+
+        var packets = new HealthSyncPacket(packet, LastBodyPart, corpseSyncPacket, killerId, _lastWeaponId);
+
+        PacketSender.NetworkManager.SendPlayerPacket(in packets, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public override void OnDead(EDamageType damageType)
+    {
+        OnPlayerDeath?.Invoke(this);
+
+        foreach (var unsubcribe in _armorUnsubcribes)
+        {
+            unsubcribe?.Invoke();
+        }
+
+        if (LastDamageInfo.Weapon is null && _lastWeaponId is not null)
+        {
+            FindKillerWeapon();
+#if DEBUG
+            if (LastDamageInfo.Weapon != null)
+            {
+                FikaGlobals.LogWarning($"Found weapon '{LastDamageInfo.Weapon.Name.Localized()}'!");
+            }
+#endif
+        }
+        base.OnDead(damageType);
+        PacketSender.SendState = false;
+        if (IsYourPlayer)
+        {
+            LocalPlayerDiedAsync(destroyCancellationToken.ToManaged())
+                .Forget();
+        }
+    }
+
+    public override void OnDestroy()
+    {
+        OnPlayerDestroyed?.Invoke(this);
+        base.OnDestroy();
+    }
+
+    /// <summary>
+    /// The side to record on a dogtag
+    /// </summary>
+    private EPlayerSide DogtagSide
+    {
+        get
+        {
+            return Profile.Info.Settings.Role switch
+            {
+                WildSpawnType.pmcUSEC => EPlayerSide.Usec,
+                WildSpawnType.pmcBEAR => EPlayerSide.Bear,
+                _ => Side
+            };
+        }
+    }
+
+    private void GenerateDogtagDetails()
+    {
+        if (LastDamageInfo.Weapon is null && _lastWeaponId is not null)
+        {
+            FindKillerWeapon();
+#if DEBUG
+            if (LastDamageInfo.Weapon != null)
+            {
+                FikaGlobals.LogWarning($"Found weapon '{LastDamageInfo.Weapon.Name.Localized()}'!");
+            }
+#endif
+        }
+
+        var accountId = AccountId;
+        var profileId = ProfileId;
+        var nickname = Profile.Nickname;
+        var hasAggressor = LastAggressor != null;
+        var killerAccountId = hasAggressor ? LastAggressor.AccountId : string.Empty;
+        var killerProfileId = hasAggressor ? LastAggressor.ProfileId : string.Empty;
+        var killerNickname = (hasAggressor && !string.IsNullOrEmpty(LastAggressor.Profile.Nickname)) ? LastAggressor.Profile.Nickname : string.Empty;
+        var side = DogtagSide;
+        var level = Profile.Info.Level;
+        var time = DateTimeExtensions.UtcNow.ToLocalTime();
+        var weaponName = LastAggressor != null ? (LastDamageInfo.Weapon != null ? LastDamageInfo.Weapon.ShortName : string.Empty) : "-";
+        var groupId = GroupId;
+
+        var item = Equipment.GetSlot(EquipmentSlot.Dogtag).ContainedItem;
+        if (item != null)
+        {
+            var dogtagComponent = item.GetItemComponent<DogtagComponent>();
+            if (dogtagComponent != null)
+            {
+                dogtagComponent.Item.SpawnedInSession = true;
+                dogtagComponent.AccountId = accountId;
+                dogtagComponent.ProfileId = profileId;
+                dogtagComponent.Nickname = nickname;
+                dogtagComponent.KillerAccountId = killerAccountId;
+                dogtagComponent.KillerProfileId = killerProfileId;
+                dogtagComponent.KillerName = killerNickname;
+                dogtagComponent.Side = side;
+                dogtagComponent.Level = level;
+                dogtagComponent.Time = time;
+                dogtagComponent.Status = hasAggressor ? "Killed by" : "Died";
+                dogtagComponent.WeaponName = weaponName;
+                dogtagComponent.GroupId = groupId;
+                return;
+            }
+        }
+
+        FikaGlobals.LogError($"GenerateAndSendDogTagPacket: Item or Dogtagcomponent was null on player {Profile.Nickname}, id {NetId}");
+    }
+
+    private async Task LocalPlayerDiedAsync(CancellationToken token = default)
+    {
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            AddPlayerRequest request = new(FikaBackendUtils.GroupId, ProfileId, FikaBackendUtils.IsSpectator);
+            await FikaRequestHandler.PlayerDied(request);
+        }
+        catch (OperationCanceledException)
+        {
+
+        }
+        catch (Exception ex)
+        {
+            FikaGlobals.LogError($"Failed to send PlayerDied request: {ex}");
+        }
+    }
+
+    public override void TryInteractionCallback(LootableContainer container)
+    {
+        LootableContainerInteractionHandler handler = new(this, container);
+        if (handler.Container != null && _openAction != null)
+        {
+            _openAction.Invoke(new System.Action(handler.Handle));
+        }
+        _openAction = null;
+    }
+
+    public override void BtrInteraction(BTRSide btr, byte placeId, EInteractionType interaction)
+    {
+        if (FikaBackendUtils.IsServer)
+        {
+            base.BtrInteraction(btr, placeId, interaction);
+            return;
+        }
+
+        var client = Singleton<FikaClient>.Instance;
+        BTRInteractionPacket packet = new(NetId)
+        {
+            Data = btr.GetInteractWithBtrPacket(placeId, interaction)
+        };
+        client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        UpdateInteractionCast();
+    }
+
+    public void SetupMainPlayer()
+    {
+        Profile.Info.GroupId = "Fika";
+        Profile.Info.TeamId = "Fika";
+    }
+
+    public void HandleHeadLightsPacket(HeadLightsPacket packet)
+    {
+        try
+        {
+            if (_helmetLightControllers != null)
+            {
+                for (var i = 0; i < _helmetLightControllers.Count(); i++)
+                {
+                    _helmetLightControllers.ElementAt(i)?.LightMod?.SetLightState(packet.LightStates[i]);
+                }
+                if (!packet.IsSilent)
+                {
+                    SwitchHeadLightsAnimation();
+                }
+            }
+        }
+        catch
+        {
+            // Do nothing
+        }
+    }
+
+    public void HandleInventoryOpenedPacket(bool opened)
+    {
+        base.SetInventoryOpened(opened);
+    }
+
+    public void HandleDropPacket(bool fastDrop)
+    {
+        /*DropHandler handler = new(this);*/
+        base.DropCurrentController(new System.Action(FikaGlobals.EmptyAction), fastDrop, null);
+    }
+
+    public void HandleUsableItemPacket(UsableItemPacket packet)
+    {
+        if (HandsController is UsableItemController usableItemController)
+        {
+            if (packet.ExamineWeapon)
+            {
+                usableItemController.ExamineWeapon();
+            }
+
+            if (packet.HasCompassState)
+            {
+                usableItemController.CompassState.Value = packet.CompassState;
+            }
+
+            if (packet.HasAim)
+            {
+                usableItemController.SetAim(packet.AimState);
+            }
+        }
+    }
+
+    public void ObservedStationaryInteract(StationaryWeapon stationaryWeapon, StationaryWeaponPacket.EStationaryCommand command)
+    {
+        if (command == StationaryWeaponPacket.EStationaryCommand.Occupy)
+        {
+            stationaryWeapon.SetOperator(ProfileId, false);
+            MovementContext.StationaryWeapon = stationaryWeapon;
+            MovementContext.InteractionParameters = stationaryWeapon.GetInteractionParameters();
+            MovementContext.PlayerAnimatorSetApproached(false);
+            MovementContext.PlayerAnimatorSetStationary(true);
+            MovementContext.PlayerAnimatorSetStationaryAnimation((int)stationaryWeapon.Animation);
+            return;
+        }
+        if (command == StationaryWeaponPacket.EStationaryCommand.Leave)
+        {
+            return;
+        }
+        MovementContext.PlayerAnimatorSetStationary(false);
+        if (MovementContext.StationaryWeapon != null)
+        {
+            MovementContext.StationaryWeapon.Unlock(ProfileId);
+        }
+    }
+
+    public virtual void DoObservedVault(VaultPacket vaultPacket)
+    {
+
+    }
+
+    public override void PauseAllEffectsOnPlayer()
+    {
+        ActiveHealthController.PauseAllEffects();
+    }
+
+    public override void UnpauseAllEffectsOnPlayer()
+    {
+        ActiveHealthController.UnpauseAllEffects();
+    }
+
+    public void HandleCallbackFromServer(in OperationCallbackPacket operationCallbackPacket)
+    {
+        if (OperationCallbacks.TryGetValue(operationCallbackPacket.CallbackId, out var callback))
+        {
+            if (operationCallbackPacket.Status != EOperationStatus.Started)
+            {
+                OperationCallbacks.Remove(operationCallbackPacket.CallbackId);
+            }
+            ServerOperationStatus status = new(operationCallbackPacket.Status, operationCallbackPacket.Error);
+            callback(status);
+        }
+        else
+        {
+            FikaGlobals.LogError($"Could not find CallbackId: {operationCallbackPacket.CallbackId}!");
+        }
+    }
+
+    public override void ApplyExplosionDamageToArmor(Il2CppSystem.Collections.Generic.Dictionary<ExplosionDamageInfo, float> armorDamage, DamageInfo damageInfo)
+    {
+        if (IsYourPlayer)
+        {
+            for (var i = 0; i < _preAllocatedArmorComponents.Count; i++)
+            {
+                var armorComponent = _preAllocatedArmorComponents[i];
+                var num = 0f;
+                foreach ((var colliderStruct, var amount) in armorDamage)
+                {
+                    if (armorComponent.ShotMatches(colliderStruct.BodyPartColliderType, colliderStruct.ArmorPlateCollider))
+                    {
+                        num += amount;
+                    }
+                }
+
+                if (num > 0f)
+                {
+                    num = armorComponent.ApplyExplosionDurabilityDamage(num, damageInfo, _preAllocatedArmorComponents);
+                    OnArmorDamaged(num, armorComponent);
+                    OnArmorPointsChanged(armorComponent);
+                }
+            }
+        }
+    }
+
+    public override void OnArmorPointsChanged(ArmorComponent armor, bool children = false)
+    {
+        if (!children)
+        {
+            var packet = new ArmorDamagePacket(armor.Item.Id, armor.Repairable.Durability);
+            FikaGlobals.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+    }
+
+    public virtual void HandleDamagePacket(DamagePacket packet)
+    {
+        if (_healthController == null || !_healthController.IsAlive)
+        {
+            return;
+        }
+
+        DamageInfo damageInfo = new()
+        {
+            Damage = packet.Damage,
+            DamageType = packet.DamageType,
+            BodyPartColliderType = packet.ColliderType,
+            HitPoint = packet.Point,
+            HitNormal = packet.HitNormal,
+            Direction = packet.Direction,
+            PenetrationPower = packet.PenetrationPower,
+            BlockedBy = packet.BlockedBy.ToIl2CppNullable(),
+            DeflectedBy = packet.DeflectedBy.ToIl2CppNullable(),
+            ArmorDamage = packet.ArmorDamage
+        };
+
+        if (packet.SourceId is not null)
+        {
+            damageInfo.SourceId = packet.SourceId;
+        }
+
+        if (packet.ProfileId is not null)
+        {
+            var player = Singleton<GameWorld>.Instance.GetAlivePlayerBridgeByProfileID(packet.ProfileId);
+            if (player != null)
+            {
+                damageInfo.Player = player;
+                if (IsYourPlayer
+                    && !FikaPlugin.Instance.Settings.FriendlyFire
+                    && string.Equals(damageInfo.Player.iPlayer.GroupId, GroupId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+            }
+            _lastWeaponId = packet.WeaponId;
+        }
+
+        if (damageInfo.DamageType == EDamageType.Melee && _lastWeaponId is not null)
+        {
+            var item = FindWeapon();
+            if (item != null)
+            {
+                damageInfo.Weapon = item;
+                (damageInfo.Player.iPlayer as FikaPlayer)._shouldSendSideEffect = true;
+#if DEBUG
+                FikaGlobals.LogWarning("Found weapon for knife damage: " + item.Name.Localized());
+#endif
+            }
+        }
+
+        ShotReactions(damageInfo, packet.BodyPartType);
+        ReceiveDamage(damageInfo.Damage, packet.BodyPartType, damageInfo.DamageType, packet.Absorbed, packet.Material);
+        base.ApplyDamageInfo(damageInfo, packet.BodyPartType, packet.ColliderType, packet.Absorbed);
+    }
+
+    public override void OnSideEffectApplied(SideEffectComponent sideEffect)
+    {
+        if (!_shouldSendSideEffect)
+        {
+            return;
+        }
+
+        SideEffectPacket packet = new()
+        {
+            ItemId = sideEffect.Item.Id,
+            Value = sideEffect.Value
+        };
+
+        PacketSender.NetworkManager.SendData(ref packet, DeliveryMethod.ReliableOrdered, true);
+        _shouldSendSideEffect = false;
+    }
+
+    public void HandleArmorDamagePacket(ArmorDamagePacket packet)
+    {
+        for (var i = 0; i < _preAllocatedArmorComponents.Count; i++)
+        {
+            var armorComponent = _preAllocatedArmorComponents[i];
+            if (armorComponent.Item.Id == packet.ItemId)
+            {
+                armorComponent.Repairable.Durability = packet.Durability;
+                armorComponent.Buff.TryDisableComponent(armorComponent.Repairable.Durability);
+                armorComponent.Item.RaiseRefreshEvent(false, false);
+                return;
+            }
+        }
+
+        var gstruct = Singleton<GameWorld>.Instance.FindItemById(packet.ItemId);
+        if (gstruct.Failed)
+        {
+            FikaGlobals.LogError("HandleArmorDamagePacket: " + gstruct.Error);
+            return;
+        }
+
+        var itemComponent = gstruct.Value.GetItemComponent<ArmorComponent>();
+        if (itemComponent != null)
+        {
+            itemComponent.Repairable.Durability = packet.Durability;
+            itemComponent.Buff.TryDisableComponent(itemComponent.Repairable.Durability);
+            itemComponent.Item.RaiseRefreshEvent(false, false);
+        }
+    }
+
+    public override bool SetShotStatus(BodyPartCollider bodypart, Shot shot, Vector3 hitpoint, Vector3 shotNormal, Vector3 shotDirection)
+    {
+        var armorPlateCollider = bodypart as ArmorPlateCollider;
+        var earmorPlateCollider = ((armorPlateCollider == null) ? 0 : armorPlateCollider.ArmorPlateColliderType);
+        for (var i = 0; i < _preAllocatedArmorComponents.Count; i++)
+        {
+            var armorComponent = _preAllocatedArmorComponents[i];
+            if (armorComponent.ShotMatches(bodypart.BodyPartColliderType, earmorPlateCollider))
+            {
+                if (armorComponent.Deflects(shotDirection, shotNormal, shot))
+                {
+                    return true;
+                }
+                if (!shot.BlockedBy.HasValue)
+                {
+                    armorComponent.SetPenetrationStatus(shot);
+                }
+            }
+        }
+        return false;
+    }
+
+    public override void UpdateTick()
+    {
+        _voipController?.Update();
+        base.UpdateTick();
+    }
+
+    public void CheckAndResetControllers(ExitStatus exitStatus, float pastTime, string locationId, string exitName)
+    {
+        _questController?.CheckExitConditionCounters(exitStatus, pastTime, locationId, exitName, HealthController.BodyPartEffects, TriggerZones);
+        _questController?.ResetCurrentNullableCounters();
+
+        _achievementsController?.CheckExitConditionCounters(exitStatus, pastTime, locationId, exitName, HealthController.BodyPartEffects, TriggerZones);
+        _achievementsController?.ResetCurrentNullableCounters();
+    }
+
+    public override void Dispose()
+    {
+        foreach (var unsubcribe in _armorUnsubcribes)
+        {
+            unsubcribe?.Invoke();
+        }
+
+        if (PacketSender != null)
+        {
+            PacketSender.DestroyThis();
+            PacketSender = null;
+        }
+
+        _voipController?.Dispose();
+        _lastWeaponId = null;
+        _unsubscribeOnEndSession?.Invoke();
+        _unsubscribeOnEndSession = null;
+        if (IsYourPlayer)
+        {
+            switch (InventoryController)
+            {
+                case HostInventoryController hostController:
+                    hostController.ClearPool();
+                    break;
+                case ClientInventoryController clientController:
+                    clientController.ClearPool();
+                    break;
+                default:
+                    FikaGlobals.LogWarning($"Unknown inventory controller when disposing: {InventoryController.GetType().Name}");
+                    break;
+            }
+        }
+        base.Dispose();
+    }
+
+    public override Il2CppSystem.Threading.Tasks.Task OnGameSessionEnd(ExitStatus exitStatus, float pastTime, string locationId, string exitName)
+    {
+        if (_achievementsController != null)
+        {
+            _achievementsController.AchievementUnlocked -= UnlockAchievement;
+        }
+        return base.OnGameSessionEnd(exitStatus, pastTime, locationId, exitName);
+    }
+
+    public override void OnVaulting()
+    {
+        var packet = new VaultPacket(VaultingParameters.GetVaultingStrategy(), VaultingParameters.MaxWeightPointPosition,
+            VaultingParameters.VaultingHeight, VaultingParameters.VaultingLength, MovementContext.VaultingSpeed,
+            VaultingParameters.BehindObstacleRatio, VaultingParameters.AbsoluteForwardVelocity);
+        PacketSender.NetworkManager.SendPlayerPacket(in packet, NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public void ReceiveTraderServicesData(List<TraderServiceAvailabilityData> services)
+    {
+        if (!IsYourPlayer)
+        {
+            return;
+        }
+
+        var servicesData = Singleton<GlobalConfiguration>.Instance.ServicesData;
+
+        for (var i = 0; i < services.Count; i++)
+        {
+            var service = services[i];
+            GlobalConfiguration.ServiceData serviceData = new(service, null);
+            if (servicesData.ContainsKey(serviceData.ServiceType))
+            {
+                servicesData[serviceData.ServiceType] = serviceData;
+            }
+            else
+            {
+                servicesData.Add(serviceData.ServiceType, serviceData);
+            }
+            if (!Profile.TradersInfo.TryGetValue(serviceData.TraderId, out var traderInfo))
+            {
+                FikaGlobals.LogWarning($"Can't find trader with id: {serviceData.TraderId}!");
+            }
+            else
+            {
+                traderInfo.SetServiceAvailability(serviceData.ServiceType, service.CanAfford, service.WasPurchasedInThisRaid);
+            }
+        }
+    }
+
+    public Item FindQuestItem(MongoID templateId)
+    {
+        for (var i = 0; i < Singleton<GameWorld>.Instance.LootList.Count; i++)
+        {
+            var lootItem = Singleton<GameWorld>.Instance.LootList[i];
+            if (lootItem is LootItem observedLootItem && observedLootItem.Item.TemplateId == templateId && observedLootItem.isActiveAndEnabled)
+            {
+                return observedLootItem.Item;
+            }
+        }
+#if DEBUG
+        FikaGlobals.LogInfo($"Could not find questItem with id '{templateId}' in the current session, either the quest is not active or something else occured.");
+#endif
+        return null;
+    }
+
+    #region handlers
+    public sealed class KeyHandler(FikaPlayer player)
+    {
+        public Option<UnlockResult> UnlockResult;
+        private readonly FikaPlayer _player = player;
+
+        internal void HandleKeyEvent()
+        {
+            UnlockResult.Value.RaiseEvents(_player._inventoryController, CommandStatus.Succeed);
+        }
+    }
+
+    private sealed class LootableContainerInteractionHandler(FikaPlayer player, LootableContainer container)
+    {
+        private readonly FikaPlayer _player = player;
+        public readonly LootableContainer Container = container;
+
+        public void Handle()
+        {
+            var packet = new ContainerInteractionPacket(Container.Id, EInteractionType.Close);
+            _player.PacketSender.NetworkManager.SendPlayerPacket(in packet, _player.NetId, DeliveryMethod.ReliableOrdered, true);
+
+            Container.Interact(new InteractionResult(EInteractionType.Close));
+            if (_player.MovementContext.LevelOnApproachStart > 0f)
+            {
+                _player.MovementContext.SetPoseLevel(_player.MovementContext.LevelOnApproachStart, false);
+                _player.MovementContext.LevelOnApproachStart = -1f;
+            }
+        }
+    }
+
+    private sealed class EmptyHandsControllerHandler(FikaPlayer fikaPlayer, bool scheduled)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly bool _scheduled = scheduled;
+        public Process<EmptyHandsController, IEmptyHandsController> Process;
+        public Action ConfirmCallback;
+
+        internal EmptyHandsController ReturnController()
+        {
+            return EmptyHandsController.CreateController<EmptyHandsController>(_fikaPlayer);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.EmptyHands
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, default, 0f, 0, EProceedType.EmptyHands, _scheduled);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class FirearmControllerHandler(FikaPlayer fikaPlayer, Weapon weapon)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        public readonly Weapon Weapon = weapon;
+        public Process<FirearmController, IFirearmHandsController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientFirearmController ReturnController()
+        {
+            return FikaClientFirearmController.Create(_fikaPlayer, Weapon);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.Weapon,
+                ItemId = Weapon.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, Weapon.Id, 0f, 0,
+                Weapon.IsStationaryWeapon ? EProceedType.Stationary : EProceedType.Weapon, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class UsableItemControllerHandler(FikaPlayer fikaPlayer, Item item)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly Item _item = item;
+        public Process<UsableItemController, IUsableItemController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientUsableItemController ReturnController()
+        {
+            return FikaClientUsableItemController.Create(_fikaPlayer, _item);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.UsableItem,
+                ItemId = _item.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, _item.Id, 0f, 0, EProceedType.UsableItem, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class PortableRangeFinderControllerHandler(FikaPlayer fikaPlayer, Item item)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly Item _item = item;
+        public Process<PortableRangeFinderController, IUsableItemController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientPortableRangeFinderController ReturnController()
+        {
+            return FikaClientPortableRangeFinderController.Create(_fikaPlayer, _item);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.UsableItem,
+                ItemId = _item.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, _item.Id, 0f, 0, EProceedType.UsableItem, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class QuickUseItemControllerHandler(FikaPlayer fikaPlayer, Item item)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly Item _item = item;
+        public Process<QuickUseItemController, IQuickUseItem> Process;
+        public Action ConfirmCallback;
+
+        internal QuickUseItemController ReturnController()
+        {
+            return QuickUseItemController.CreateController<QuickUseItemController>(_fikaPlayer, _item);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.QuickUse,
+                ItemId = _item.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, _item.Id, 0f, 0, EProceedType.QuickUse, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class MedsControllerHandler(FikaPlayer fikaPlayer, Meds meds, EFT.NetworkPackets.OneAndList<EBodyPart> bodyParts, int animationVariant)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly Meds _meds = meds;
+        private readonly EFT.NetworkPackets.OneAndList<EBodyPart> _bodyParts = bodyParts;
+        private readonly int _animationVariant = animationVariant;
+        public Process<MedsController, IMedsController> Process;
+        public Action ConfirmCallback;
+
+        internal MedsController ReturnController()
+        {
+            return MedsController.CreateController<MedsController>(_fikaPlayer, _meds, _bodyParts, 1f, _animationVariant);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.MedsClass,
+                ItemId = _meds.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(_bodyParts, _meds.Id, 1f, _animationVariant,
+                EProceedType.MedsClass, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class FoodControllerHandler(FikaPlayer fikaPlayer, FoodDrink foodDrink, float amount, EFT.NetworkPackets.OneAndList<EBodyPart> bodyParts, int animationVariant)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly FoodDrink _foodDrink = foodDrink;
+        private readonly float _amount = amount;
+        private readonly EFT.NetworkPackets.OneAndList<EBodyPart> _bodyParts = bodyParts;
+        private readonly int _animationVariant = animationVariant;
+        public Process<MedsController, IMedsController> Process;
+        public Action ConfirmCallback;
+
+        internal MedsController ReturnController()
+        {
+            return MedsController.CreateController<MedsController>(_fikaPlayer, _foodDrink, _bodyParts, _amount, _animationVariant);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.FoodClass,
+                ItemId = _foodDrink.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(_bodyParts, _foodDrink.Id, _amount, _animationVariant,
+                EProceedType.MedsClass, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class KnifeControllerHandler(FikaPlayer fikaPlayer, KnifeComponent knife)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        public readonly KnifeComponent Knife = knife;
+        public Process<KnifeController, IKnifeController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientKnifeController ReturnController()
+        {
+            return FikaClientKnifeController.Create(_fikaPlayer, Knife);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.Knife,
+                ItemId = Knife.Item.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, Knife.Item.Id, 0f, 0, EProceedType.Knife, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class RecorderControllerHandler(FikaPlayer fikaPlayer, RecorderItem recorder)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        public readonly RecorderItem Recorder = recorder;
+        public Process<RecorderHandsController, IRecorderController> Process;
+        public Action ConfirmCallback;
+        public RecorderHandler Handler;
+
+        internal RecorderHandsController ReturnController()
+        {
+            Handler = _fikaPlayer.RecorderController.CreateRecorderHandler(Recorder);
+            return RecorderHandsController.CreateController<RecorderHandsController>(_fikaPlayer, Recorder, Handler);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.Recorder,
+                ItemId = Recorder.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, Recorder.Id, 0f, 0, EProceedType.Recorder, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+            RecorderActionPacket.Send(_fikaPlayer, Recorder.Id, Handler);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class QuickKnifeControllerHandler(FikaPlayer fikaPlayer, KnifeComponent knife)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        public readonly KnifeComponent Knife = knife;
+        public Process<QuickKnifeKickController, IQuickKnifeKickController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientQuickKnifeController ReturnController()
+        {
+            return FikaClientQuickKnifeController.Create(_fikaPlayer, Knife);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.QuickKnifeKick,
+                ItemId = Knife.Item.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, Knife.Item.Id, 0f, 0, EProceedType.QuickKnifeKick, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class GrenadeControllerHandler(FikaPlayer fikaPlayer, ThrowWeap throwWeap)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly ThrowWeap _throwWeap = throwWeap;
+        public Process<GrenadeHandsController, IGrenadeController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientGrenadeController ReturnController()
+        {
+            return FikaClientGrenadeController.Create(_fikaPlayer, _throwWeap);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.GrenadeClass,
+                ItemId = _throwWeap.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, _throwWeap.Id, 0f, 0, EProceedType.GrenadeClass, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class QuickGrenadeControllerHandler(FikaPlayer fikaPlayer, ThrowWeap throwWeap)
+    {
+        private readonly FikaPlayer _fikaPlayer = fikaPlayer;
+        private readonly ThrowWeap _throwWeap = throwWeap;
+        public Process<QuickGrenadeThrowHandsController, IQuickGrenadeThrowController> Process;
+        public Action ConfirmCallback;
+
+        internal FikaClientQuickGrenadeController ReturnController()
+        {
+            return FikaClientQuickGrenadeController.Create(_fikaPlayer, _throwWeap);
+        }
+
+        internal void HandleCallbackResponse(bool succeed)
+        {
+            if (succeed)
+            {
+                SendPacket();
+            }
+            Process.Confirm(succeed);
+        }
+
+        internal void SendCallbackRequest()
+        {
+            var client = Singleton<FikaClient>.Instance;
+            var id = _fikaPlayer.CreateProceedCallback(HandleCallbackResponse);
+            var packet = new ProceedRequestPacket
+            {
+                NetId = _fikaPlayer.NetId,
+                CallbackId = id,
+                ProceedType = EProceedType.QuickGrenadeThrow,
+                ItemId = _throwWeap.Id
+            };
+            client.SendData(ref packet, DeliveryMethod.ReliableOrdered);
+        }
+
+        internal void SendPacket()
+        {
+            var packet = new ProceedPacket(default, _throwWeap.Id, 0f, 0, EProceedType.QuickGrenadeThrow, false);
+            _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in packet, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+        }
+
+        internal void HandleResult(IResult result)
+        {
+            if (result.Succeed)
+            {
+                ConfirmCallback();
+            }
+        }
+    }
+
+    private sealed class ProceedCallbackHandler(Action<bool> confirmAction)
+    {
+        private readonly Action<bool> _confirmAction = confirmAction;
+
+        public void Handle(IResult result)
+        {
+            _confirmAction(result.Succeed);
+        }
+    }
+}
+#endregion

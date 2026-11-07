@@ -1,0 +1,227 @@
+﻿// © 2026 Lacyway All Rights Reserved
+
+using EFT;
+using EFT.HealthSystem;
+using EFT.InventoryLogic;
+using EFT.UI;
+using EFT.UI.Screens;
+using Fika.Core.Main.Components;
+using Fika.Core.Main.Players;
+using Fika.Core.Networking.Packets.Player.Common;
+using Fika.Core.Networking.Packets.Player.Common.SubPackets;
+using System;
+using Il2CppInterop.Runtime.Injection;
+using Fika.Core.Main.Utils;
+
+namespace Fika.Core.Main.ClientClasses;
+
+public sealed class ClientHealthController : PlayerHealthController
+{
+    public ClientHealthController(IntPtr pointer) : base(pointer)
+    {
+    }
+
+    public ClientHealthController(Profile.HealthInfo healthInfo, Player player, InventoryController inventoryController, SkillManager skillManager, bool aiHealth) : base(ClassInjector.DerivedConstructorPointer<ClientHealthController>())
+    {
+        ClassInjector.DerivedConstructorBody(this);
+        _fikaPlayer = (FikaPlayer)player;
+        ClassInjector.InvokeBaseConstructor<PlayerHealthController>(this, healthInfo, player, inventoryController, skillManager, aiHealth);
+    }
+
+    public bool ReviveEnabled { get; } = FikaPlugin.Instance.Settings.ReviveConfig.Enabled;
+    public bool Downed { get; internal set; }
+    public bool CanBeDowned
+    {
+        get
+        {
+            return !_bledOut && (_maxRevives == 0 || _revives < _maxRevives) && CanBeRevivedByOtherPlayer();
+        }
+    }
+
+    public float BleedoutTime { get; } = FikaPlugin.Instance.Settings.ReviveConfig.BleedoutTime;
+    public bool ShouldBleedOut => BleedoutTime > 0f;
+
+    private readonly int _maxRevives = FikaPlugin.Instance.Settings.ReviveConfig.MaxRevives;
+    private readonly bool _headshotKills = FikaPlugin.Instance.Settings.ReviveConfig.HeadshotKills;
+    private readonly bool _grenadesKills = FikaPlugin.Instance.Settings.ReviveConfig.GrenadesKills;
+    private int _revives;
+    private bool _bledOut;
+
+    private readonly FikaPlayer _fikaPlayer;
+
+    public override bool _sendNetworkSyncPackets
+    {
+        get
+        {
+            return true;
+        }
+    }
+
+    public void EnableMetabolism()
+    {
+        MetabolismDisabled = false;
+    }
+
+    /// <summary>
+    /// Checks if any other players are alive that can revive
+    /// </summary>
+    /// <returns><see langword="true"/> if someone can revive; otherwise <see langword="false"/></returns>
+    private bool CanBeRevivedByOtherPlayer()
+    {
+        if (CoopHandler.TryGetCoopHandler(out var coopHandler))
+        {
+            if (coopHandler.AmountOfHumans <= 1)
+            {
+                return false;
+            }
+
+            return !coopHandler.AreAllHumanPlayersDead();
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Checks whether last damage should kill from a grenade or headshot
+    /// </summary>
+    /// <returns><see langword="true"/> if the damage should kill; <see langword="false"/> if not</returns>
+    public bool CheckIfDamageShouldInstantKill()
+    {
+        if (_grenadesKills && _fikaPlayer.LatestDamageInfo.DamageType is EDamageType.GrenadeFragment)
+        {
+            return true;
+        }
+
+        if (_fikaPlayer.LastDamagedBodyPart is EBodyPart.Head && _headshotKills)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    public override void SendNetworkSyncPacket(SyncHealthPacket packet)
+    {
+        if (packet.SyncType == SyncHealthPacket.ESyncType.IsAlive && !packet.Data.IsAlive.IsAlive)
+        {
+            if (!TryProcessDownedState())
+            {
+                _fikaPlayer.SetupCorpseSyncPacket(packet);
+            }
+            return;
+        }
+
+        if (packet.SyncType is SyncHealthPacket.ESyncType.ApplyDamage)
+        {
+            return;
+        }
+        
+        var syncPacket = new HealthSyncPacket(packet);
+        _fikaPlayer.PacketSender.NetworkManager.SendPlayerPacket(in syncPacket, _fikaPlayer.NetId, DeliveryMethod.ReliableOrdered, true);
+    }
+
+    public void Revive()
+    {
+        _revives++;
+        Downed = false;
+        if (Energy.Current <= 20f)
+        {
+            ChangeEnergy(20f);
+        }
+
+        if (Hydration.Current <= 20f)
+        {
+            ChangeHydration(20f);
+        }
+
+        if (ShouldBleedOut)
+        {
+            var gameUi = MonoBehaviourSingleton<GameUI>.Instance;
+            gameUi.BattleUiPanelExtraction.Close();
+        }
+    }
+
+    public void BleedOut()
+    {
+        _bledOut = true;
+        IsAlive = true; // need to be alive to trigger Kill() again
+        Kill(_fikaPlayer.LatestDamageInfo.DamageType);
+    }
+
+    private bool TryProcessDownedState()
+    {
+        if (!ReviveEnabled)
+        {
+            return false;
+        }
+
+        if (_bledOut)
+        {
+            return false;
+        }
+
+        if (Downed)
+        {
+            return true;
+        }
+
+        if (!CanBeDowned)
+        {
+            return false;
+        }
+
+        if (CheckIfDamageShouldInstantKill())
+        {
+            return false;
+        }
+
+        if ((_fikaPlayer.LatestDamageInfo.DamageType & (EDamageType.Exhaustion | EDamageType.Dehydration | EDamageType.Stimulator)) != 0) // starving / dehydration / stims will not trigger downed
+        {
+            return false;
+        }
+
+        EftScreenManager.Instance.ToggleScreen(EEftScreenType.Inventory);
+
+        RestoreBodyPartNoEvents(EBodyPart.Head); // prevent blacked out head
+        RestoreBodyPartNoEvents(EBodyPart.Chest); // prevent blacked out chest
+
+        RemoveAllBleedEffects();
+
+        _fikaPlayer.ToggleDowned(true);
+        return true;
+    }
+
+    /// <summary>
+    /// Removes all bleed effects from the health controller
+    /// </summary>
+    /// <remarks>Mainly used to prevent instantly broken limbs after revive</remarks>
+    private void RemoveAllBleedEffects()
+    {
+        for (var i = Effects.Count - 1; i >= 0; i--)
+        {
+            if (Effects[i] is HeavyBleeding heavyBleeding)
+            {
+                heavyBleeding.ForceRemove();
+                continue;
+            }
+
+            if (Effects[i] is LightBleeding lightBleeding)
+            {
+                lightBleeding.ForceRemove();
+            }
+        }
+    }
+
+    private void RestoreBodyPartNoEvents(EBodyPart bodyPart)
+    {
+        var limb = BodyState[bodyPart];
+        if (limb.IsDestroyed)
+        {
+            limb.IsDestroyed = false;
+            limb.Health.Current = 1f;
+
+            NetworkSyncDestroyedBodyPart(bodyPart, EDamageType.Medicine);
+            NetworkSyncBodyHealth(bodyPart);
+        }
+    }
+}

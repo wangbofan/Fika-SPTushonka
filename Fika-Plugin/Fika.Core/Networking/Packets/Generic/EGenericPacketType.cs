@@ -1,0 +1,117 @@
+﻿namespace Fika.Core.Networking.Packets.Generic;
+
+/// <summary>
+/// Represents generic game-level packet events unrelated to specific systems.
+/// </summary>
+public enum EGenericPacketType : byte
+{
+    /// <summary>
+    /// Client extraction event.
+    /// </summary>
+    ClientExtract,
+
+    /// <summary>
+    /// Client connected to the server.
+    /// </summary>
+    ClientConnected,
+
+    /// <summary>
+    /// Client disconnected from the server.
+    /// </summary>
+    ClientDisconnected,
+
+    /// <summary>
+    /// Exfiltration countdown event.
+    /// </summary>
+    ExfilCountdown,
+
+    /// <summary>
+    /// Update backend data.
+    /// </summary>
+    UpdateBackendData,
+
+    /// <summary>
+    /// Secret exfiltration found event.
+    /// </summary>
+    SecretExfilFound,
+
+    /// <summary>
+    /// Border zone event.
+    /// </summary>
+    BorderZoneEvent,
+
+    /// <summary>
+    /// Mine triggered.
+    /// </summary>
+    MineEvent,
+
+    /// <summary>
+    /// Disarm a tripwire event.
+    /// </summary>
+    DisarmTripwire,
+
+    /// <summary>
+    /// Spawns the BTR vehicle.
+    /// </summary>
+    SpawnBTR,
+
+    /// <summary>
+    /// Sync characters with server
+    /// </summary>
+    CharacterSync,
+
+    /// <summary>
+    /// Inventory operation
+    /// </summary>
+    InventoryOperation,
+
+    /// <summary>
+    /// Callback status for operation
+    /// </summary>
+    OperationCallback,
+
+    /// <summary>
+    /// Pinging
+    /// </summary>
+    Ping,
+
+    /// <summary>
+    /// Sending character data
+    /// </summary>
+    SendCharacter,
+
+    /// <summary>
+    /// Syncable item, e.g. window or lamp
+    /// </summary>
+    SyncableItem,
+
+    /// <summary>
+    /// AI loaded by all clients
+    /// </summary>
+    SpawnAI,
+
+    /// <summary>
+    /// A client was hit by another player, the host decides whether the attacker angers Lightkeeper
+    /// </summary>
+    LighthouseAggression,
+
+    /// <summary>
+    /// The host changed a client's radio transmitter encoding
+    /// </summary>
+    TransmitterEncoded,
+
+    /// <summary>
+    /// Trader dialog entry
+    /// </summary>
+    DialogEntry
+
+    /// <summary>
+    /// Train synchronization event (commented out).
+    /// </summary>
+    // TrainSync,
+
+    /// <summary>
+    /// Trader service notification event (commented out).
+    /// </summary>
+    // TraderServiceNotification,
+}

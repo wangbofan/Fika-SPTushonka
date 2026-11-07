@@ -211,7 +211,7 @@ error CS0103: 当前上下文中不存在名称"FikaFinalMissionDirector"
 [Fika Server] Overriding SPT configuration
 [客户端请求] /fika/client/check/mods
 [WebSocket 请求] /fika/notification/
-[Fika Notification Manager] User is 6aee9ac8fd75fdb69c9a1184
+[Fika Notification Manager] User is <你的档案ID>
 ```
 
 → **插件加载成功、HTTP 握手成功、WebSocket 通道建立成功**。全程只有 1 条错误日志：

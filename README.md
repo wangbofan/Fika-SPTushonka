@@ -1,3 +1,5 @@
+![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)
+
 # Fika for SPT 5.0 / SPTushonka（EFT 1.3.0.1-48558）
 
 把 [Project Fika](https://github.com/project-fika) 的 **dev-5.0**（Fika 3.0.0）分支移植到 **SPT 5.0.0 + SPTushonka + BepInDX 6（BepInEx 6 / IL2CPP）** 环境，并附带一键安装器与无头客户端管理器。
@@ -101,7 +103,7 @@ dotnet publish FikaSetup/FikaSetup.csproj -c Release -r win-x64 --self-contained
 
 ## 许可与致谢
 
-- 本仓库是 [Project Fika](https://github.com/project-fika) 的衍生作品，沿用 **CC BY-NC-SA 4.0**：署名、非商业、相同方式共享。详见 `LICENSE.md`、`NOTICE.md`
+- 本仓库是 [Project Fika](https://github.com/project-fika) 的衍生作品，沿用 **CC BY-NC-SA 4.0**：署名、非商业、相同方式共享。详见 `LICENSE`、`NOTICE.md`
 - `FikaHeadlessManager` 来自 [Lacyway/Fika-Headless-Manager](https://github.com/project-fika/Fika-Headless-Manager)（MIT）
 - SPT / SPTushonka / Escape from Tarkov 的代码与资源**不包含**在本仓库内，需要自行准备
 - 仅供个人学习与单机/好友联机使用，请勿用于商业用途

@@ -14,8 +14,9 @@
     <BepInExCore>$(GameRoot)\BepInEx\core</BepInExCore>
     <Interop>$(GameRoot)\BepInEx\interop</Interop>
     <SptPlugins>$(GameRoot)\BepInEx\plugins\sptushonka</SptPlugins>
-    <FikaBuild>$(MSBuildThisFileDirectory)build</FikaBuild>
-    <FikaPlugins>$(FikaBuild)\plugins</FikaPlugins>
+    <!-- Fika.Headless 需要引用已编译的 Fika.Core.dll；直接指向上一步的构建输出，
+         不依赖上游 postbuild-core.bat（它写到 Fika-Plugin\Build，且 Target 不一定触发）。 -->
+    <FikaPlugins>$(MSBuildThisFileDirectory)Fika-Plugin\Fika.Core\bin\$(Configuration)</FikaPlugins>
   </PropertyGroup>
 
 </Project>

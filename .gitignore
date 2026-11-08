@@ -2,6 +2,8 @@
 [Bb]in/
 [Oo]bj/
 /build/
+Fika-Plugin/[Bb]uild/
+Fika-Headless/[Bb]uild/
 .vs/
 .idea/
 *.user

@@ -87,10 +87,27 @@ dotnet publish FikaSetup/FikaSetup.csproj -c Release -r win-x64 --self-contained
 
 ## 安装（普通用户）
 
-1. 到 [Releases](../../releases) 下载 `FikaSetup.exe`
-2. 关闭游戏与 `SPT.Server.exe`
-3. 打开安装器 → 选游戏目录 → 勾「创建独立无头客户端副本」→ 点「一键全部安装」
-4. 启动顺序：`SPT.Server` → 游戏（主机）/ `run-headless.cmd`（无头）
+到 [Releases](../../releases) 下载，三种任选：
+
+| 文件 | 适合谁 | 说明 |
+|---|---|---|
+| `Fika-3.0.0-SPT5.0.zip` | 手动安装 / 只要本体 | 2.6 MB，`Fika.Core.dll` + `FikaServer` + 可选无头端，附 `安装说明.txt` |
+| `FikaSetup.exe` | 大多数人 | 49.7 MB 单文件，一键装客户端 + 服务端 + 无头副本 + 无头档案 + 防火墙 + 一键体检 |
+| `FikaHeadlessManager.exe` | 只更新无头启动器 | 2.2 MB |
+
+**用安装器（推荐）**
+
+1. 关闭游戏与 `SPT.Server.exe`
+2. 打开安装器 → 选游戏目录 → 勾「创建独立无头客户端副本」→ 点「一键全部安装」
+3. 启动顺序：`SPT.Server` → 游戏（主机）/ `run-headless.cmd`（无头）
+
+**用免安装包（手动）**
+
+1. 关闭游戏与 `SPT.Server.exe`
+2. 把 `BepInEx/` 覆盖到游戏根目录（每台机器都要）
+3. 把 `SPT_Runtime/` 覆盖到游戏根目录（只有开服那台需要）
+4. 跑一次 `SPT.Server.exe` 生成 `fika.jsonc`，然后进游戏
+5. `可选-无头端/` 里的东西**只放进无头副本**，不要放进日常客户端
 
 联机端口：TCP `6969`（SPT 服务端）、UDP `25565`（Fika）。跨机游玩时另一台机器填**主机局域网 IP**（多网卡机器别选成热点网卡）。
 

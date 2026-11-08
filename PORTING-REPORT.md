@@ -697,6 +697,45 @@ Fika.Headless.dll：已装；FikaHeadlessManager.exe：已装；根目录 Headle
 
 安装器不修改该项，保持 BepInEx 默认行为。
 
+
+### 10.11 无头反复重启：Fika.Headless 的插件黑名单
+
+**现象**（别人机器上的反馈）：
+
+```
+[Fatal :Fika.Headless] 1 invalid plugins found, this headless host will not be available for hosting!
+... Remove these mods: Amands's Graphics, GUID: com.Amanda.Graphics
+```
+
+同时弹 `HEADLESS ERROR` 对话框；Manager 窗口不断刷
+
+```
+Starting headless client without graphics and no extra logging.
+Game exited, restarting...
+```
+
+**原因**：`FikaHeadlessPlugin.VerifyPlugins()` 里硬编码了一份黑名单（11 个），命中即 `LogFatal` + 弹窗 + `Thread.Sleep(-1)`（永久挂起），并把 `_invalidPluginsFound` 置真，不建立 Headless WebSocket —— 也就是「不提供托管」。客户端进程一退出，Manager 3 秒后又拉起，于是死循环。
+
+黑名单（1.5.3）：
+
+```
+com.Amanda.Graphics              com.Amanda.Sense
+VIP.TommySoucy.MoreCheckmarks    com.kmyuhkyuk.EFTApi
+com.mpstark.DynamicMaps          IhanaMies.LootValue
+com.cactuspie.ramcleanerinterval com.TYR.DeClutter
+SPTVRAMCleaner.UniqueGUID        harmonyzt.sptleaderboard
+com.acidphantasm.stattrack
+```
+
+**处理**：从**无头副本**的 `BepInEx\plugins` 里删掉命中的 mod（主客户端可以留着）；如果服务端 `fika.jsonc` 的 `client.mods.required` 里也列了这些 GUID，一并去掉。
+
+**安装器已内置检测**（v1.0.1）：`--headless-check` / 「一键体检 / 修复」会扫副本的插件目录，按字节匹配上述 GUID 并输出命中文件：
+
+```
+✗ 黑名单插件：AmandsGraphics.dll（com.Amanda.Graphics）
+    → 无头会以「invalid plugins found」拒绝托管，请删掉/移出 ...\BepInEx\plugins\AmandsGraphics
+```
+
 ---
 
 ## 11. 法律/许可提醒

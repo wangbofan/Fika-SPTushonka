@@ -94,6 +94,28 @@ dotnet publish FikaSetup/FikaSetup.csproj -c Release -r win-x64 --self-contained
 
 联机端口：TCP `6969`（SPT 服务端）、UDP `25565`（Fika）。跨机游玩时另一台机器填**主机局域网 IP**（多网卡机器别选成热点网卡）。
 
+
+## 常见问题
+
+**Q：无头主机需要单独的 Fika 文件吗？**
+不需要。Fika 只有一套，客户端插件 + 服务端 mod；「无头副本」只是多加载一个 `Fika.Headless.dll` 并在 `-nographics` 下运行。
+
+**Q：客机看不到主机的房间 / 看不到主机昵称**
+1. 客机的启动器服务器地址必须是**主机的** `IP:6969`（不是自己的 `127.0.0.1`，那样连的是自己的服务器，列表自然是空的）
+2. 主机要**真的开好战局并在图里**（普通客户端点 Host Raid 后自己会进图；无头主机由无头进图）。停在菜单/藏身处时列表里没有战局
+3. 主机防火墙放行 TCP `6969`、UDP `25565`；跨网段还要通 VPN 或端口转发
+
+**Q：点 Join 是灰的，提示「无法加入其它地图的战局」**
+这是 Fika 的 `F_UI_CannotJoinRaidOtherMap`：客机当前**选的地图和主机开战局时的地图不一致**。
+在 Matchmaker 界面先把地图切成和主机相同的（时间段也要相同，否则会提示 other time），Join 按钮才会亮。
+> 代码位置：`Fika.Core/UI/Custom/MatchMakerUIScript.cs`，`RaidSettings.LocationId != entry.Location` 就禁用按钮。
+
+**Q：无头一直 `Game exited, restarting...`**
+见上面「已知限制」下面的说明，99% 是无头副本里装了 Fika.Headless 黑名单里的 mod（画质/UI/内存清理类）。用安装器的「一键体检 / 修复」会直接列出文件。
+
+**Q：能用 EFT 自带的组队 / 邀请吗？**
+不行。Fika 的加入入口是 Matchmaker 界面右侧的战局列表（Join），不是好友组队。主机没开局前进组也进不去。
+
 ## 已知限制
 
 - **过场/终局剧情同步被关闭**：上游缺文件，本仓库用空实现占位，编译通过但没有功能

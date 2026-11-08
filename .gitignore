@@ -1,13 +1,13 @@
-# build output
+# 构建产物
 [Bb]in/
 [Oo]bj/
-build/
-*.user
-*.suo
+/build/
 .vs/
 .idea/
+*.user
+*.suo
 
-# binaries are not tracked (see NOTICE.md)
+# 二进制与本地引用（见 NOTICE.md）
 References/
 *.dll
 *.exe
@@ -15,5 +15,5 @@ References/
 *.cache
 *.zip
 
-# logs
+# 日志
 *.log

@@ -930,6 +930,13 @@ public static class InstallerCore
             ok = false;
         }
 
+        var banned = FindBlacklistedMods(gameDir);
+        foreach (var (file, guid) in banned)
+        {
+            log($"  ✗ 黑名单插件：{Path.GetFileName(file)}（{guid}）会让无头拒绝托管，请从副本里删掉");
+            ok = false;
+        }
+
         if (!string.IsNullOrWhiteSpace(copyDir) && Directory.Exists(copyDir))
         {
             var plugin = Path.Combine(copyDir, @"BepInEx\plugins\Fika\Fika.Headless.dll");
@@ -964,6 +971,53 @@ public static class InstallerCore
         return ok;
     }
 
+
+    /// <summary>
+    /// Fika.Headless 1.5.3 内置的黑名单：带这些插件时无头会自检失败、拒绝托管
+    /// （源码 FikaHeadlessPlugin.VerifyPlugins 里硬编码）。
+    /// </summary>
+    public static readonly string[] HeadlessBlacklist =
+    [
+        "com.Amanda.Graphics",
+        "com.Amanda.Sense",
+        "VIP.TommySoucy.MoreCheckmarks",
+        "com.kmyuhkyuk.EFTApi",
+        "com.mpstark.DynamicMaps",
+        "IhanaMies.LootValue",
+        "com.cactuspie.ramcleanerinterval",
+        "com.TYR.DeClutter",
+        "SPTVRAMCleaner.UniqueGUID",
+        "harmonyzt.sptleaderboard",
+        "com.acidphantasm.stattrack"
+    ];
+
+    /// <summary>扫描目录下的 BepInEx 插件，找出命中无头黑名单的 dll。</summary>
+    public static List<(string File, string Guid)> FindBlacklistedMods(string gameDir)
+    {
+        var hits = new List<(string, string)>();
+        var plugins = Path.Combine(gameDir, @"BepInEx\plugins");
+        if (!Directory.Exists(plugins)) return hits;
+
+        foreach (var dll in Directory.GetFiles(plugins, "*.dll", SearchOption.AllDirectories))
+        {
+            try
+            {
+                var bytes = File.ReadAllBytes(dll);
+                foreach (var guid in HeadlessBlacklist)
+                {
+                    if (bytes.AsSpan().IndexOf(System.Text.Encoding.UTF8.GetBytes(guid)) >= 0)
+                    {
+                        hits.Add((dll, guid));
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        return hits;
+    }
+
     /// <summary>无头环境自检：档案 / amount / 插件 / Manager 是否齐备。</summary>
     public static bool HeadlessCheck(string gameDir, Action<string> log)
     {
@@ -982,6 +1036,14 @@ public static class InstallerCore
         log($"Fika.Headless.dll：{(plugin ? "已装" : "未装")}；FikaHeadlessManager.exe：{(manager ? "已装" : "未装")}；根目录 HeadlessConfig.json：{(cfgFile ? "有" : "无")}");
 
         var ok = true;
+
+        var banned = FindBlacklistedMods(gameDir);
+        foreach (var (file, guid) in banned)
+        {
+            log($"  ✗ 黑名单插件：{Path.GetFileName(file)}（{guid}）");
+            log($"      → 无头会以「invalid plugins found」拒绝托管，请删掉/移出 {Path.GetDirectoryName(file)}");
+            ok = false;
+        }
         if (profiles.Count == 0) { log("  ✗ 没有任何无头档案 —— 用「无头账户管理」新建 1 个"); ok = false; }
         if (!plugin) { log("  ✗ 当前目录没有 Fika.Headless.dll —— 这不是无头副本，请用副本目录"); ok = false; }
         if (cfgExists && amount != profiles.Count)

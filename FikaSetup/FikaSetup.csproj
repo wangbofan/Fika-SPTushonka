@@ -19,8 +19,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- payload.zip 由 make-payload.py 生成，仓库不存放二进制；没有它时仍可编译，只是运行时没有可安装内容 -->
-    <EmbeddedResource Include="payload.zip" LogicalName="payload.zip" Condition="Exists('payload.zip')" />
+    <EmbeddedResource Include="payload.zip" LogicalName="payload.zip" />
     <Compile Remove="bin/**;obj/**" />
   </ItemGroup>
 

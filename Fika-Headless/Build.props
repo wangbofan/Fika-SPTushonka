@@ -14,12 +14,7 @@
 		<Compile Include="../Properties/AssemblyInfo.cs" />
 	</ItemGroup>
 
-	<PropertyGroup>
-		<GameDir Condition="'$(GameDir)' == ''">D:/SPT-5.0.0/DEV</GameDir>
-		<BepInExCore>$(GameDir)/BepInEx/core</BepInExCore>
-		<Interop>$(GameDir)/BepInEx/interop</Interop>
-		<SptPlugins>$(GameDir)/BepInEx/plugins/sptushonka</SptPlugins>
-		<FikaPlugins>$(GameDir)/BepInEx/plugins/Fika</FikaPlugins>
-	</PropertyGroup>
+	<!-- 路径统一由仓库根的 Directory.Build.props 提供（GameRoot / BepInExCore / Interop / SptPlugins / FikaPlugins）。
+	     上游这里写死了 D:/SPT-5.0.0/DEV，会覆盖根配置，导致 clone 后编译找不到 EFT/Comfort 等程序集。 -->
 
 </Project>
